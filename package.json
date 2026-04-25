@@ -1,0 +1,13 @@
+{
+  "name": "youtube-trimmer",
+  "version": "1.0.0",
+  "scripts": {
+    "start:server": "cd server && npm start",
+    "start:client": "cd client && npm run dev",
+    "dev": "npx concurrently \"npm run start:server\" \"npm run start:client\"",
+    "install:all": "cd server && npm install && cd ../client && npm install"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.1"
+  }
+}
