@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { io, Socket } from 'socket.io-client';
-import { Film, Terminal, Play, Pause, X } from 'lucide-react';
+import { Film, Terminal, X } from 'lucide-react';
 import './App.css';
 
 interface ClipItem {
@@ -31,6 +31,30 @@ const formatTimestamp = (secs: number): string => {
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${s.toFixed(2)}`;
 };
 
+const parseTimestamp = (str: string): number | null => {
+  const trimmed = str.trim();
+  if (!trimmed) return null;
+
+  // Try HH:MM:SS or HH:MM:SS.MS format
+  const match = trimmed.match(/^(\d{1,2}):(\d{1,2})(?::(\d+(?:\.\d+)?))?$/);
+  if (match) {
+    const h = parseInt(match[1], 10);
+    const m = parseInt(match[2], 10);
+    const s = match[3] ? parseFloat(match[3]) : 0;
+    if (h >= 0 && m >= 0 && m < 60 && s >= 0) {
+      return h * 3600 + m * 60 + s;
+    }
+  }
+
+  // Try raw seconds (with or without decimal)
+  const seconds = parseFloat(trimmed);
+  if (!isNaN(seconds) && seconds >= 0) {
+    return seconds;
+  }
+
+  return null;
+};
+
 const extractYouTubeId = (url: string): string => {
   const patterns = [
     /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([^&\n?#]+)/,
@@ -50,10 +74,9 @@ declare global {
   }
 }
 
-// Module-level cache for File objects (survives component mount/unmount)
+// Module-level cache for File objects (survives component mount/unmount within the same session)
 const fileClipCache = new Map<string, File>();
 
-// Persistence utilities
 const CLIPS_STORAGE_KEY = 'stitcher_clips';
 
 const persistClips = (clips: ClipItem[]) => {
@@ -92,11 +115,6 @@ const loadClips = (setClips: React.Dispatch<React.SetStateAction<ClipItem[]>>) =
   }
 };
 
-const clearClips = () => {
-  localStorage.removeItem(CLIPS_STORAGE_KEY);
-  fileClipCache.clear();
-};
-
 function StitchPage() {
   const [clips, setClips] = useState<ClipItem[]>([]);
   const [ytInput, setYtInput] = useState('');
@@ -117,26 +135,25 @@ function StitchPage() {
   const clipsRef = useRef<ClipItem[]>([]);
   const logContainerRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const projectInputRef = useRef<HTMLInputElement>(null);
 
   const totalDuration = clips.reduce((sum, c) => sum + Math.max(0, c.trimEnd - c.trimStart), 0);
 
-  // Load clips from localStorage on mount
   useEffect(() => {
     loadClips(setClips);
   }, []);
 
-  // Load YouTube IFrame API
   useEffect(() => {
+    if (document.querySelector('script[src="https://www.youtube.com/iframe_api"]')) {
+      if (window.YT && window.YT.Player) setYoutubeReady(true);
+      return;
+    }
     const tag = document.createElement('script');
     tag.src = 'https://www.youtube.com/iframe_api';
     document.body.appendChild(tag);
-
-    window.onYouTubeIframeAPIReady = () => {
-      setYoutubeReady(true);
-    };
+    window.onYouTubeIframeAPIReady = () => setYoutubeReady(true);
   }, []);
 
-  // Socket setup
   useEffect(() => {
     const newSocket = io({
       path: '/socket.io',
@@ -172,14 +189,12 @@ function StitchPage() {
     };
   }, []);
 
-  // Auto-scroll logs
   useEffect(() => {
     if (logContainerRef.current) {
       logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
     }
   }, [logs]);
 
-  // Keep clipsRef in sync for preview interval
   useEffect(() => {
     clipsRef.current = clips;
   }, [clips]);
@@ -211,6 +226,18 @@ function StitchPage() {
     };
   };
 
+  const reuploadFileClip = (id: string, file: File) => {
+    const objectUrl = URL.createObjectURL(file);
+    fileClipCache.set(id, file);
+    setClips((prev) => {
+      const updated = prev.map((c) =>
+        c.id === id ? { ...c, file, objectUrl, uploadedPath: undefined } : c
+      );
+      persistClips(updated);
+      return updated;
+    });
+  };
+
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
@@ -240,9 +267,11 @@ function StitchPage() {
         trimStart: 0,
         trimEnd: data.duration
       };
-      const updated = [...clips, newClip];
-      setClips(updated);
-      persistClips(updated);
+      setClips((prev) => {
+        const updated = [...prev, newClip];
+        persistClips(updated);
+        return updated;
+      });
       setYtInput('');
     } catch (err: any) {
       alert(`Error adding YouTube clip: ${err.message}`);
@@ -252,45 +281,65 @@ function StitchPage() {
   };
 
   const removeClip = (id: string) => {
-    const clip = clips.find(c => c.id === id);
-    if (clip && clip.objectUrl) {
-      URL.revokeObjectURL(clip.objectUrl);
-    }
-    if (clip && clip.type === 'youtube' && ytPlayerRefs.current[id]) {
+    const clip = clips.find((c) => c.id === id);
+    if (clip?.objectUrl) URL.revokeObjectURL(clip.objectUrl);
+    if (clip?.type === 'youtube' && ytPlayerRefs.current[id]) {
       ytPlayerRefs.current[id].destroy();
       delete ytPlayerRefs.current[id];
     }
     fileClipCache.delete(id);
-    const updated = clips.filter(c => c.id !== id);
-    setClips(updated);
-    persistClips(updated);
+    setClips((prev) => {
+      const updated = prev.filter((c) => c.id !== id);
+      persistClips(updated);
+      return updated;
+    });
+  };
+
+  const moveClip = (id: string, direction: 'up' | 'down') => {
+    setClips((prev) => {
+      const idx = prev.findIndex((c) => c.id === id);
+      if (idx === -1) return prev;
+      const newIdx = direction === 'up' ? idx - 1 : idx + 1;
+      if (newIdx < 0 || newIdx >= prev.length) return prev;
+      const next = [...prev];
+      [next[idx], next[newIdx]] = [next[newIdx], next[idx]];
+      persistClips(next);
+      return next;
+    });
   };
 
   const updateTrim = (id: string, field: 'trimStart' | 'trimEnd', value: number) => {
-    const updated = clips.map((c) => {
-      if (c.id !== id) return c;
-      const clamped = Math.max(0, Math.min(c.duration, value));
-      if (field === 'trimStart') {
-        return { ...c, trimStart: Math.min(clamped, c.trimEnd - 0.1) };
-      } else {
-        return { ...c, trimEnd: Math.max(clamped, c.trimStart + 0.1) };
-      }
+    setClips((prev) => {
+      const updated = prev.map((c) => {
+        if (c.id !== id) return c;
+        const clamped = Math.max(0, Math.min(c.duration, value));
+        if (field === 'trimStart') {
+          return { ...c, trimStart: Math.min(clamped, c.trimEnd - 0.1) };
+        } else {
+          return { ...c, trimEnd: Math.max(clamped, c.trimStart + 0.1) };
+        }
+      });
+      persistClips(updated);
+      return updated;
     });
-    setClips(updated);
-    persistClips(updated);
   };
 
   const startPreview = () => {
+    // Clear stitch state so the log section disappears and UI is clean
+    setLogs([]);
+    setProgress(0);
+    setIsStitching(false);
     setPreviewActive(true);
     setPreviewIndex(0);
   };
 
   const advancePreview = () => {
-    if (previewIndex + 1 < clips.length) {
-      setPreviewIndex((i) => i + 1);
-    } else {
+    const current = clipsRef.current;
+    setPreviewIndex((i) => {
+      if (i + 1 < current.length) return i + 1;
       stopPreview();
-    }
+      return i;
+    });
   };
 
   const stopPreview = () => {
@@ -309,13 +358,104 @@ function StitchPage() {
     }
   };
 
+  const saveProject = () => {
+    if (clips.length === 0) {
+      alert('No clips to save');
+      return;
+    }
+
+    const projectData = {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      clips: clips.map((c) => ({
+        id: c.id,
+        type: c.type,
+        youtubeUrl: c.youtubeUrl,
+        videoId: c.videoId,
+        title: c.title,
+        duration: c.duration,
+        trimStart: c.trimStart,
+        trimEnd: c.trimEnd,
+        uploadedPath: c.uploadedPath
+      }))
+    };
+
+    const json = JSON.stringify(projectData, null, 2);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `stitch-project-${Date.now()}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const loadProject = async (file: File) => {
+    try {
+      const text = await file.text();
+      const projectData = JSON.parse(text);
+
+      if (!projectData.clips || !Array.isArray(projectData.clips)) {
+        alert('Invalid project file format');
+        return;
+      }
+
+      const restoredClips: ClipItem[] = [];
+
+      for (const clip of projectData.clips) {
+        if (clip.type === 'youtube') {
+          restoredClips.push({
+            id: clip.id,
+            type: 'youtube',
+            youtubeUrl: clip.youtubeUrl,
+            videoId: clip.videoId,
+            title: clip.title,
+            duration: clip.duration,
+            trimStart: clip.trimStart,
+            trimEnd: clip.trimEnd
+          });
+        } else if (clip.type === 'file' && clip.uploadedPath) {
+          restoredClips.push({
+            id: clip.id,
+            type: 'file',
+            uploadedPath: clip.uploadedPath,
+            title: clip.title,
+            duration: clip.duration,
+            trimStart: clip.trimStart,
+            trimEnd: clip.trimEnd
+          });
+        }
+      }
+
+      if (restoredClips.length === 0) {
+        alert('No valid clips found in project file');
+        return;
+      }
+
+      setClips(restoredClips);
+      persistClips(restoredClips);
+      alert(`Loaded ${restoredClips.length} clips`);
+    } catch (err: any) {
+      alert(`Failed to load project: ${err.message}`);
+    }
+  };
+
+  const handleProjectFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      loadProject(file);
+      e.target.value = '';
+    }
+  };
+
   const startStitch = async () => {
     if (clips.length < 2 || !socket) return;
     setIsStitching(true);
     setLogs(['Starting stitch...']);
     setProgress(0);
 
-    // Upload files first if needed
     const clipsToStitch = await Promise.all(
       clips.map(async (clip) => {
         if (clip.type === 'file' && !clip.uploadedPath && clip.file) {
@@ -363,10 +503,28 @@ function StitchPage() {
 
   const currentClip = clips[previewIndex];
 
+  // Check if any file clip is missing its objectUrl (file lost after page reload)
+  const hasOrphanedClips = clips.some((c) => c.type === 'file' && !c.objectUrl);
+
   return (
     <div className="container">
-      <header>
+      <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <h1><Film /> Stitch Files</h1>
+        <div style={{ display: 'flex', gap: '8px' }}>
+          <button onClick={saveProject} className="secondary" title="Download project as JSON">
+            💾 Save Project
+          </button>
+          <button onClick={() => projectInputRef.current?.click()} className="secondary" title="Load project from JSON">
+            📂 Load Project
+          </button>
+          <input
+            ref={projectInputRef}
+            type="file"
+            accept=".json"
+            onChange={handleProjectFileSelect}
+            style={{ display: 'none' }}
+          />
+        </div>
       </header>
 
       {previewActive && (
@@ -382,25 +540,18 @@ function StitchPage() {
 
           {currentClip?.type === 'file' ? (
             <video
+              key={currentClip.id}
               ref={previewVideoRef}
               src={currentClip.objectUrl}
-              autoPlay
-              style={{
-                width: '100%',
-                borderRadius: '8px',
-                backgroundColor: '#000',
-                maxHeight: '500px'
-              }}
+              style={{ width: '100%', borderRadius: '8px', backgroundColor: '#000', maxHeight: '500px', display: 'block' }}
               onLoadedMetadata={() => {
                 if (previewVideoRef.current) {
                   previewVideoRef.current.currentTime = currentClip.trimStart;
+                  previewVideoRef.current.play();
                 }
               }}
               onTimeUpdate={() => {
-                if (
-                  previewVideoRef.current &&
-                  previewVideoRef.current.currentTime >= currentClip.trimEnd
-                ) {
+                if (previewVideoRef.current && previewVideoRef.current.currentTime >= currentClip.trimEnd) {
                   advancePreview();
                 }
               }}
@@ -411,13 +562,10 @@ function StitchPage() {
         </div>
       )}
 
-      {/* YouTube player init for preview */}
       {previewActive && currentClip?.type === 'youtube' && youtubeReady && (
         <YouTubePreviewInit
           clip={currentClip}
-          onRef={(player) => {
-            previewYtPlayerRef.current = player;
-          }}
+          onRef={(player) => { previewYtPlayerRef.current = player; }}
           onAdvance={advancePreview}
           previewIntervalRef={previewIntervalRef}
         />
@@ -449,22 +597,28 @@ function StitchPage() {
         />
       </div>
 
+      {hasOrphanedClips && (
+        <div className="orphan-warning">
+          ⚠ Some file clips lost their reference after page reload. Use the re-upload button on each affected clip.
+        </div>
+      )}
+
       {clips.length > 0 && (
         <>
-          <div style={{ marginTop: '20px' }}>
+          <div style={{ marginTop: '8px' }}>
             {clips.map((clip, idx) => (
               <ClipCard
                 key={clip.id}
                 clip={clip}
                 index={idx}
+                total={clips.length}
                 onRemove={() => removeClip(clip.id)}
                 onTrimChange={(field, value) => updateTrim(clip.id, field, value)}
-                onPlayerRef={(el) => {
-                  if (clip.type === 'file') videoRefs.current[clip.id] = el;
-                }}
-                onYtPlayerInit={(player) => {
-                  ytPlayerRefs.current[clip.id] = player;
-                }}
+                onPlayerRef={(el) => { videoRefs.current[clip.id] = el; }}
+                onYtPlayerInit={(player) => { ytPlayerRefs.current[clip.id] = player; }}
+                onMoveUp={() => moveClip(clip.id, 'up')}
+                onMoveDown={() => moveClip(clip.id, 'down')}
+                onReupload={(file) => reuploadFileClip(clip.id, file)}
                 youtubeReady={youtubeReady}
               />
             ))}
@@ -476,12 +630,12 @@ function StitchPage() {
             </div>
             {clips.length >= 2 && (
               <>
-                <button onClick={startPreview} className="secondary">
+                <button onClick={startPreview} className="secondary" disabled={hasOrphanedClips}>
                   ▶ Preview All
                 </button>
                 <button
                   onClick={startStitch}
-                  disabled={isStitching}
+                  disabled={isStitching || hasOrphanedClips}
                   style={{ minWidth: '150px' }}
                 >
                   {isStitching ? 'Stitching...' : `Stitch ${clips.length} clips`}
@@ -505,10 +659,7 @@ function StitchPage() {
           </div>
           {isStitching && (
             <div className="progress-bar-container">
-              <div
-                className="progress-bar-fill"
-                style={{ width: `${progress}%` }}
-              />
+              <div className="progress-bar-fill" style={{ width: `${progress}%` }} />
             </div>
           )}
         </div>
@@ -517,37 +668,96 @@ function StitchPage() {
   );
 }
 
+interface TimestampInputProps {
+  value: number;
+  onChange: (seconds: number) => void;
+  maxDuration: number;
+  label: string;
+  minValue?: number;
+}
+
+function TimestampInput({ value, onChange, maxDuration, label, minValue = 0 }: TimestampInputProps) {
+  const [displayValue, setDisplayValue] = useState(formatTimestamp(value));
+  const [isFocused, setIsFocused] = useState(false);
+
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setDisplayValue(e.target.value);
+  };
+
+  const handleBlur = () => {
+    setIsFocused(false);
+    const parsed = parseTimestamp(displayValue);
+
+    if (parsed === null) {
+      setDisplayValue(formatTimestamp(value));
+    } else {
+      const clamped = Math.max(minValue, Math.min(maxDuration, parsed));
+      onChange(clamped);
+      setDisplayValue(formatTimestamp(clamped));
+    }
+  };
+
+  useEffect(() => {
+    if (!isFocused) {
+      setDisplayValue(formatTimestamp(value));
+    }
+  }, [value, isFocused]);
+
+  return (
+    <div className="trim-row">
+      <label className="trim-label">{label}</label>
+      <input
+        type="text"
+        value={displayValue}
+        onChange={handleChange}
+        onFocus={() => setIsFocused(true)}
+        onBlur={handleBlur}
+        placeholder="HH:MM:SS"
+        title="HH:MM:SS or HH:MM:SS.MS (e.g., 01:30:45 or 1:30)"
+        style={{ flex: 1, width: '100px' }}
+      />
+    </div>
+  );
+}
+
 interface ClipCardProps {
   clip: ClipItem;
   index: number;
+  total: number;
   onRemove: () => void;
   onTrimChange: (field: 'trimStart' | 'trimEnd', value: number) => void;
   onPlayerRef: (el: HTMLVideoElement | null) => void;
   onYtPlayerInit: (player: any) => void;
+  onMoveUp: () => void;
+  onMoveDown: () => void;
+  onReupload: (file: File) => void;
   youtubeReady: boolean;
 }
 
 function ClipCard({
   clip,
   index,
+  total,
   onRemove,
   onTrimChange,
   onPlayerRef,
   onYtPlayerInit,
+  onMoveUp,
+  onMoveDown,
+  onReupload,
   youtubeReady
 }: ClipCardProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const ytPlayerRef = useRef<any>(null);
   const ytInitialized = useRef(false);
+  const reuploadInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Initialize YouTube player for this clip
+  const canMoveUp = index > 0;
+  const canMoveDown = index < total - 1;
+  const isMissingFile = clip.type === 'file' && !clip.objectUrl;
+
   useEffect(() => {
-    if (
-      clip.type === 'youtube' &&
-      youtubeReady &&
-      window.YT &&
-      !ytInitialized.current
-    ) {
+    if (clip.type === 'youtube' && youtubeReady && window.YT && !ytInitialized.current) {
       ytInitialized.current = true;
       const playerId = `yt-player-${clip.id}`;
       const container = document.getElementById(playerId);
@@ -569,12 +779,8 @@ function ClipCard({
   }, [clip.type, clip.videoId, youtubeReady, clip.id, onYtPlayerInit]);
 
   const getCurrentTime = (): number => {
-    if (clip.type === 'file' && videoRef.current) {
-      return videoRef.current.currentTime;
-    }
-    if (clip.type === 'youtube' && ytPlayerRef.current) {
-      return ytPlayerRef.current.getCurrentTime();
-    }
+    if (clip.type === 'file' && videoRef.current) return videoRef.current.currentTime;
+    if (clip.type === 'youtube' && ytPlayerRef.current) return ytPlayerRef.current.getCurrentTime();
     return 0;
   };
 
@@ -582,13 +788,32 @@ function ClipCard({
 
   return (
     <div className="clip-card">
+      <div className="clip-reorder-col">
+        <button className="reorder-btn" onClick={onMoveUp} disabled={!canMoveUp} title="Move up">▲</button>
+        <button className="reorder-btn" onClick={onMoveDown} disabled={!canMoveDown} title="Move down">▼</button>
+      </div>
+
       <div className="clip-preview-pane">
-        {clip.type === 'file' ? (
+        {isMissingFile ? (
+          <div className="clip-missing-file">
+            <span>File unavailable</span>
+            <input
+              ref={reuploadInputRef}
+              type="file"
+              accept="video/*,audio/*"
+              style={{ display: 'none' }}
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) { onReupload(f); e.target.value = ''; }
+              }}
+            />
+            <button className="trim-set-btn" onClick={() => reuploadInputRef.current?.click()}>
+              Re-upload
+            </button>
+          </div>
+        ) : clip.type === 'file' ? (
           <video
-            ref={(el) => {
-              videoRef.current = el;
-              onPlayerRef(el);
-            }}
+            ref={(el) => { videoRef.current = el; onPlayerRef(el); }}
             src={clip.objectUrl}
             style={{ width: '100%', height: '100%', display: 'block' }}
             controls
@@ -600,21 +825,16 @@ function ClipCard({
 
       <div className="clip-controls-pane">
         <div className="clip-header">
-          <div>
-            <div className="clip-title">
-              {index + 1}. {clip.title}
-            </div>
+          <div className="clip-header-info">
+            <div className="clip-title">{index + 1}. {clip.title}</div>
             <span
               className="clip-type-badge"
-              style={{
-                backgroundColor: clip.type === 'youtube' ? '#1e40af' : '#059669',
-                color: 'white'
-              }}
+              style={{ backgroundColor: clip.type === 'youtube' ? '#1e40af' : '#059669', color: 'white' }}
             >
               {clip.type === 'youtube' ? 'YouTube' : 'File'}
             </span>
           </div>
-          <button onClick={onRemove} className="secondary" style={{ padding: '4px 8px' }}>
+          <button onClick={onRemove} className="secondary" style={{ padding: '4px 8px', flexShrink: 0 }}>
             <X size={16} />
           </button>
         </div>
@@ -624,42 +844,28 @@ function ClipCard({
         </div>
 
         <div className="trim-controls">
-          <div className="trim-row">
-            <label className="trim-label">Start:</label>
-            <input
-              type="number"
-              step="0.1"
-              min="0"
-              max={clip.duration}
-              value={clip.trimStart.toFixed(2)}
-              onChange={(e) => onTrimChange('trimStart', parseFloat(e.target.value))}
-              style={{ flex: 1, width: '100px' }}
+          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+            <TimestampInput
+              value={clip.trimStart}
+              onChange={(v) => onTrimChange('trimStart', v)}
+              maxDuration={clip.duration}
+              minValue={0}
+              label="Start:"
             />
-            <button
-              className="trim-set-btn"
-              onClick={() => onTrimChange('trimStart', getCurrentTime())}
-              title="Set to current time"
-            >
+            <button className="trim-set-btn" onClick={() => onTrimChange('trimStart', getCurrentTime())} title="Set to current time">
               ↑
             </button>
           </div>
 
-          <div className="trim-row">
-            <label className="trim-label">End:</label>
-            <input
-              type="number"
-              step="0.1"
-              min="0"
-              max={clip.duration}
-              value={clip.trimEnd.toFixed(2)}
-              onChange={(e) => onTrimChange('trimEnd', parseFloat(e.target.value))}
-              style={{ flex: 1, width: '100px' }}
+          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+            <TimestampInput
+              value={clip.trimEnd}
+              onChange={(v) => onTrimChange('trimEnd', v)}
+              maxDuration={clip.duration}
+              minValue={0}
+              label="End:"
             />
-            <button
-              className="trim-set-btn"
-              onClick={() => onTrimChange('trimEnd', getCurrentTime())}
-              title="Set to current time"
-            >
+            <button className="trim-set-btn" onClick={() => onTrimChange('trimEnd', getCurrentTime())} title="Set to current time">
               ↑
             </button>
           </div>
@@ -680,12 +886,10 @@ interface YouTubePreviewInitProps {
   previewIntervalRef: React.MutableRefObject<ReturnType<typeof setInterval> | null>;
 }
 
-function YouTubePreviewInit({
-  clip,
-  onRef,
-  onAdvance,
-  previewIntervalRef
-}: YouTubePreviewInitProps) {
+function YouTubePreviewInit({ clip, onRef, onAdvance, previewIntervalRef }: YouTubePreviewInitProps) {
+  const onAdvanceRef = useRef(onAdvance);
+  onAdvanceRef.current = onAdvance;
+
   useEffect(() => {
     if (!window.YT) return;
 
@@ -712,7 +916,7 @@ function YouTubePreviewInit({
               if (currentTime >= clip.trimEnd) {
                 event.target.pauseVideo();
                 if (previewIntervalRef.current) clearInterval(previewIntervalRef.current);
-                onAdvance();
+                onAdvanceRef.current();
               }
             }, 250);
           } else if (
@@ -731,11 +935,10 @@ function YouTubePreviewInit({
     onRef(player);
 
     return () => {
-      if (previewIntervalRef.current) {
-        clearInterval(previewIntervalRef.current);
-      }
+      if (previewIntervalRef.current) clearInterval(previewIntervalRef.current);
+      try { player.destroy(); } catch {}
     };
-  }, [clip.videoId, clip.trimStart, clip.trimEnd, onRef, onAdvance, previewIntervalRef]);
+  }, [clip.videoId, clip.trimStart, clip.trimEnd]);
 
   return null;
 }

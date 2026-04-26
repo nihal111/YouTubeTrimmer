@@ -548,6 +548,13 @@ button.secondary:hover {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
+  gap: 8px;
+}
+
+.clip-header-info {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .clip-title {
@@ -635,6 +642,67 @@ button.secondary:hover {
   font-size: 0.9rem;
   color: var(--text-dim);
   font-weight: 600;
+}
+
+.clip-reorder-col {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.reorder-btn {
+  padding: 6px 8px;
+  font-size: 0.8rem;
+  background: var(--surface-hover);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-dim);
+  cursor: pointer;
+  line-height: 1;
+  min-width: 0;
+  transition: all 0.15s;
+}
+
+.reorder-btn:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--accent);
+  background: var(--surface);
+  transform: none;
+}
+
+.reorder-btn:disabled {
+  opacity: 0.2;
+  cursor: not-allowed;
+}
+
+.clip-missing-file {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  gap: 8px;
+  background: rgba(255, 100, 100, 0.08);
+  border: 1px dashed rgba(255, 100, 100, 0.4);
+  border-radius: 8px;
+  padding: 8px;
+}
+
+.clip-missing-file span {
+  font-size: 0.72rem;
+  color: var(--text-dim);
+  text-align: center;
+}
+
+.orphan-warning {
+  background: rgba(255, 180, 0, 0.1);
+  border: 1px solid rgba(255, 180, 0, 0.4);
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 0.85rem;
+  color: #fbbf24;
 }
 
 .preview-player-section {

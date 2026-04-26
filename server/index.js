@@ -221,6 +221,25 @@ io.on('connection', (socket) => {
   });
 });
 
+// Run a child process and pipe stdout/stderr to socket logs
+function runCommand(socket, cmd, args) {
+  return new Promise((resolve, reject) => {
+    let errorOutput = '';
+    const child = spawn(cmd, args);
+    child.stdout.on('data', (data) => socket.emit('stitch:log', data.toString()));
+    child.stderr.on('data', (data) => {
+      const msg = data.toString();
+      errorOutput += msg;
+      socket.emit('stitch:log', msg);
+    });
+    child.on('close', (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`${cmd} failed (code ${code}): ${errorOutput.slice(-200)}`));
+    });
+    child.on('error', (err) => reject(err));
+  });
+}
+
 // Stitch function - concatenates multiple clips (file or YouTube) with per-clip trimming
 async function runStitch(socket, clips) {
   const jobId = `stitch_${Date.now()}`;
@@ -232,7 +251,16 @@ async function runStitch(socket, clips) {
   try {
     socket.emit('stitch:log', `Processing ${clips.length} clips...`);
 
-    // Step 1: For each clip, produce a trimmed intermediate
+    // Step 1: For each clip, produce a trimmed + timestamp-normalized intermediate.
+    // Each yt-dlp clip carries absolute timestamps from the source video's position
+    // (e.g. a clip at 10:00 has PTS ~600s). The concat demuxer adds these offsets
+    // instead of resetting them, producing a 12-minute output with 5-minute frozen gaps.
+    // Fix: after yt-dlp download, re-encode each clip with setpts=PTS-STARTPTS to reset
+    // timestamps to 0 AND scale to a consistent 1920x1080 (different source resolutions
+    // trigger filter-graph reconfiguration during concat, dropping hundreds of frames).
+    // After normalization, stream-copy concat is safe and fast.
+    const NORMALIZE_VF = 'scale=1920:1080:force_original_aspect_ratio=decrease:force_divisible_by=2,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,fps=30,setpts=PTS-STARTPTS';
+
     for (let i = 0; i < clips.length; i++) {
       const clip = clips[i];
       const intermediatePath = path.join(UPLOADS_DIR, `${jobId}_clip_${i}.mp4`);
@@ -241,61 +269,47 @@ async function runStitch(socket, clips) {
       socket.emit('stitch:log', `[${i + 1}/${clips.length}] Processing ${clip.type}...`);
       socket.emit('stitch:progress', Math.round((i / clips.length) * 60));
 
-      await new Promise((resolve, reject) => {
-        let child;
+      if (clip.type === 'file') {
+        await runCommand(socket, 'ffmpeg', [
+          '-y',
+          '-ss', String(clip.trimStart),
+          '-to', String(clip.trimEnd),
+          '-i', clip.uploadedPath,
+          '-c:v', 'libx264', '-preset', 'fast',
+          '-c:a', 'aac',
+          '-pix_fmt', 'yuv420p',
+          '-vf', NORMALIZE_VF,
+          '-af', 'asetpts=PTS-STARTPTS',
+          intermediatePath
+        ]);
+      } else {
+        const rawPath = path.join(UPLOADS_DIR, `${jobId}_clip_${i}_raw.mp4`);
+        filesToCleanup.push(rawPath);
 
-        if (clip.type === 'file') {
-          // Trim file clip
-          child = spawn('ffmpeg', [
-            '-y',
-            '-ss', String(clip.trimStart),
-            '-to', String(clip.trimEnd),
-            '-i', clip.uploadedPath,
-            '-c', 'copy',
-            intermediatePath
-          ]);
-        } else {
-          // Download and trim YouTube clip
-          child = spawn('yt-dlp', [
-            '--download-sections', `*${clip.trimStart}-${clip.trimEnd}`,
-            '--force-keyframes-at-cuts',
-            '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-            '--merge-output-format', 'mp4',
-            '-o', intermediatePath,
-            clip.youtubeUrl
-          ]);
-        }
+        await runCommand(socket, 'yt-dlp', [
+          '--download-sections', `*${clip.trimStart}-${clip.trimEnd}`,
+          '--force-keyframes-at-cuts',
+          '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+          '--merge-output-format', 'mp4',
+          '-o', rawPath,
+          clip.youtubeUrl
+        ]);
 
-        let output = '';
-        let errorOutput = '';
-
-        child.stdout.on('data', (data) => {
-          const msg = data.toString();
-          output += msg;
-          socket.emit('stitch:log', msg);
-        });
-
-        child.stderr.on('data', (data) => {
-          const msg = data.toString();
-          errorOutput += msg;
-          socket.emit('stitch:log', msg);
-        });
-
-        child.on('close', (code) => {
-          if (code === 0) {
-            resolve();
-          } else {
-            reject(new Error(`Clip ${i + 1} failed (code ${code}): ${errorOutput}`));
-          }
-        });
-
-        child.on('error', (err) => {
-          reject(err);
-        });
-      });
+        socket.emit('stitch:log', `[${i + 1}/${clips.length}] Normalizing (scale + timestamps)...`);
+        await runCommand(socket, 'ffmpeg', [
+          '-y',
+          '-i', rawPath,
+          '-c:v', 'libx264', '-preset', 'fast',
+          '-c:a', 'aac',
+          '-pix_fmt', 'yuv420p',
+          '-vf', NORMALIZE_VF,
+          '-af', 'asetpts=PTS-STARTPTS',
+          intermediatePath
+        ]);
+      }
     }
 
-    socket.emit('stitch:progress', 65);
+    socket.emit('stitch:progress', 80);
     socket.emit('stitch:log', 'Concatenating clips...');
 
     // Step 2: Write concat list with all intermediates
@@ -305,52 +319,18 @@ async function runStitch(socket, clips) {
     fs.writeFileSync(concatListPath, concatContent);
     filesToCleanup.push(concatListPath);
 
-    // Step 3: Concatenate with stream copy first, fallback to re-encode
-    await new Promise((resolve, reject) => {
-      const doConcat = (extraArgs, label) => {
-        const args = [
-          '-y',
-          '-f', 'concat',
-          '-safe', '0',
-          '-i', concatListPath,
-          ...extraArgs,
-          outputPath
-        ];
-
-        socket.emit('stitch:log', `[ffmpeg] ${label}`);
-        console.log(`[STITCH] Running: ffmpeg ${args.join(' ')}`);
-
-        const child = spawn('ffmpeg', args);
-
-        child.stderr.on('data', (data) => {
-          socket.emit('stitch:log', data.toString());
-        });
-
-        child.stdout.on('data', (data) => {
-          socket.emit('stitch:log', data.toString());
-        });
-
-        child.on('close', (code) => {
-          if (code === 0) {
-            resolve();
-          } else if (label === 'stream copy') {
-            socket.emit('stitch:log', 'Stream copy failed; retrying with re-encode...');
-            doConcat(
-              ['-c:v', 'libx264', '-c:a', 'aac', '-preset', 'fast'],
-              're-encode'
-            );
-          } else {
-            reject(new Error(`ffmpeg concat failed with code ${code}`));
-          }
-        });
-
-        child.on('error', (err) => {
-          reject(err);
-        });
-      };
-
-      doConcat(['-c', 'copy'], 'stream copy');
-    });
+    // Step 3: Stream-copy concat — all intermediates are now identical format
+    // (1920x1080 h264/aac 30fps, timestamps starting at 0) so no re-encode needed.
+    socket.emit('stitch:log', '[ffmpeg] concatenating normalized clips (stream copy)');
+    console.log(`[STITCH] Running: ffmpeg concat stream copy`);
+    await runCommand(socket, 'ffmpeg', [
+      '-y',
+      '-f', 'concat',
+      '-safe', '0',
+      '-i', concatListPath,
+      '-c', 'copy',
+      outputPath
+    ]);
 
     socket.emit('stitch:progress', 100);
     socket.emit('stitch:complete', {
@@ -362,7 +342,6 @@ async function runStitch(socket, clips) {
     console.error(`[STITCH] Error: ${err.message}`);
     socket.emit('stitch:error', err.message);
   } finally {
-    // Cleanup all intermediates, uploaded files, and concat list
     const toDelete = [
       ...intermediates,
       ...clips.filter((c) => c.type === 'file').map((c) => c.uploadedPath),
