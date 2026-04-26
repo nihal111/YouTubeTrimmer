@@ -503,6 +503,11 @@ button.secondary:hover {
   display: none;
 }
 
+.highlight-text {
+  color: var(--accent);
+  font-weight: 700;
+}
+
 /* ---- New Stitch Page Styles ---- */
 .add-clip-panel {
   display: grid;
@@ -575,32 +580,48 @@ button.secondary:hover {
   font-weight: 600;
 }
 
-.trim-controls {
+.clip-duration-row {
   display: flex;
-  flex-direction: column;
-  gap: 6px;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  padding: 4px 0;
+}
+
+.trim-controls-horizontal {
+  display: flex;
+  gap: 12px;
   padding: 8px;
   background: var(--surface-hover);
   border-radius: 8px;
+}
+
+.trim-input-group {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .trim-row {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex: 1;
 }
 
 .trim-label {
   color: var(--text-dim);
   font-size: 0.8rem;
-  min-width: 50px;
+  white-space: nowrap;
 }
 
 .trim-row input {
   padding: 6px 8px;
   font-size: 0.85rem;
-  flex: 1;
-  max-width: 120px;
+  width: 100%;
+  min-width: 0;
 }
 
 .trim-set-btn {
@@ -612,6 +633,7 @@ button.secondary:hover {
   cursor: pointer;
   border-radius: 4px;
   transition: all 0.2s;
+  flex-shrink: 0;
 }
 
 .trim-set-btn:hover:not(:disabled) {
@@ -620,9 +642,6 @@ button.secondary:hover {
 }
 
 .clip-selected-duration {
-  font-size: 0.8rem;
-  color: var(--accent);
-  margin-top: 4px;
   font-weight: 500;
 }
 
@@ -726,17 +745,70 @@ button.secondary:hover {
   max-width: 100% !important;
 }
 
-.preview-controls {
+.preview-controls-enhanced {
   display: flex;
-  align-items: center;
+  flex-direction: column;
   gap: 12px;
-  margin-bottom: 12px;
+  margin-bottom: 16px;
+  background: rgba(0, 0, 0, 0.2);
+  padding: 12px;
+  border-radius: 8px;
+  border-bottom: 1px solid var(--border);
 }
 
-.preview-clip-info {
+.preview-top-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.preview-clip-count {
+  font-size: 0.9rem;
+  font-weight: 600;
   color: var(--text-dim);
-  font-size: 0.85rem;
+  white-space: nowrap;
+}
+
+.preview-clip-title-truncated {
   flex: 1;
+  font-size: 1rem;
+  font-weight: 500;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preview-details-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.85rem;
+  color: var(--text-dim);
+}
+
+.preview-portion-info {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.preview-duration-badge {
+  background: var(--surface-hover);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.75rem;
+}
+
+.preview-global-progress {
+  font-family: monospace;
+  font-size: 0.95rem;
+}
+
+.mini-btn {
+  padding: 4px 12px !important;
+  font-size: 0.8rem !important;
+  height: auto !important;
 }
 
 @media (max-width: 600px) {

@@ -223,8 +223,14 @@ function TrimPage() {
 
   const formatTimestamp = (secs: number): string => {
     const hms = secondsToHMS(secs);
-    const sDisplay = hms.s.toFixed(2);
-    return `${String(hms.h).padStart(2, '0')}:${String(hms.m).padStart(2, '0')}:${sDisplay}`;
+    const showHours = hms.h > 0 || (videoInfo && videoInfo.duration >= 3600);
+    const mDisplay = String(hms.m).padStart(2, '0');
+    const sDisplay = hms.s.toFixed(2).padStart(5, '0');
+    
+    if (showHours) {
+      return `${String(hms.h).padStart(2, '0')}:${mDisplay}:${sDisplay}`;
+    }
+    return `${mDisplay}:${sDisplay}`;
   };
 
   const handleHMSChange = (type: 'start' | 'end', unit: 'h' | 'm' | 's', value: string) => {
@@ -318,14 +324,19 @@ function TrimPage() {
 
   const renderHMSInput = (type: 'start' | 'end') => {
     const hms = secondsToHMS(type === 'start' ? startTime : endTime);
+    const showHours = videoInfo && videoInfo.duration >= 3600;
     return (
       <div className="hms-input">
-        <input
-          type="number"
-          value={hms.h}
-          onChange={(e) => handleHMSChange(type, 'h', e.target.value)}
-          placeholder="HH"
-        />:
+        {showHours && (
+          <>
+            <input
+              type="number"
+              value={hms.h}
+              onChange={(e) => handleHMSChange(type, 'h', e.target.value)}
+              placeholder="HH"
+            />:
+          </>
+        )}
         <input
           type="number"
           value={hms.m}

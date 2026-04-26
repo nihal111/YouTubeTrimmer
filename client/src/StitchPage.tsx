@@ -24,32 +24,43 @@ const secondsToHMS = (secs: number) => {
   return { h, m, s };
 };
 
-const hmsToSeconds = (h: number, m: number, s: number) => h * 3600 + m * 60 + s;
-
-const formatTimestamp = (secs: number): string => {
+const formatTimestamp = (secs: number, maxSecs?: number): string => {
   const { h, m, s } = secondsToHMS(secs);
-  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${s.toFixed(2)}`;
+  const showHours = h > 0 || (maxSecs !== undefined && maxSecs >= 3600);
+  
+  const mPart = String(m).padStart(2, '0');
+  const sPart = s.toFixed(2).padStart(5, '0');
+  
+  if (showHours) {
+    return `${String(h).padStart(2, '0')}:${mPart}:${sPart}`;
+  }
+  return `${mPart}:${sPart}`;
 };
 
 const parseTimestamp = (str: string): number | null => {
   const trimmed = str.trim();
   if (!trimmed) return null;
 
-  // Try HH:MM:SS or HH:MM:SS.MS format
-  const match = trimmed.match(/^(\d{1,2}):(\d{1,2})(?::(\d+(?:\.\d+)?))?$/);
-  if (match) {
-    const h = parseInt(match[1], 10);
-    const m = parseInt(match[2], 10);
-    const s = match[3] ? parseFloat(match[3]) : 0;
-    if (h >= 0 && m >= 0 && m < 60 && s >= 0) {
+  const parts = trimmed.split(':');
+  if (parts.length === 3) {
+    // HH:MM:SS
+    const h = parseInt(parts[0], 10);
+    const m = parseInt(parts[1], 10);
+    const s = parseFloat(parts[2]);
+    if (!isNaN(h) && !isNaN(m) && !isNaN(s) && h >= 0 && m >= 0 && m < 60 && s >= 0 && s < 60) {
       return h * 3600 + m * 60 + s;
     }
-  }
-
-  // Try raw seconds (with or without decimal)
-  const seconds = parseFloat(trimmed);
-  if (!isNaN(seconds) && seconds >= 0) {
-    return seconds;
+  } else if (parts.length === 2) {
+    // MM:SS
+    const m = parseInt(parts[0], 10);
+    const s = parseFloat(parts[1]);
+    if (!isNaN(m) && !isNaN(s) && m >= 0 && s >= 0 && s < 60) {
+      return m * 60 + s;
+    }
+  } else if (parts.length === 1) {
+    // SS
+    const s = parseFloat(parts[0]);
+    if (!isNaN(s) && s >= 0) return s;
   }
 
   return null;
@@ -74,10 +85,9 @@ declare global {
   }
 }
 
-// Module-level cache for File objects (survives component mount/unmount within the same session)
 const fileClipCache = new Map<string, File>();
-
 const CLIPS_STORAGE_KEY = 'stitcher_clips';
+const ACTIVE_JOB_KEY = 'stitcher_active_job';
 
 const persistClips = (clips: ClipItem[]) => {
   const serialized = clips.map((c) => ({
@@ -94,7 +104,7 @@ const persistClips = (clips: ClipItem[]) => {
   localStorage.setItem(CLIPS_STORAGE_KEY, JSON.stringify(serialized));
 };
 
-const loadClips = (setClips: React.Dispatch<React.SetStateAction<ClipItem[]>>) => {
+const loadClipsFromStorage = (setClips: React.Dispatch<React.SetStateAction<ClipItem[]>>) => {
   try {
     const stored = localStorage.getItem(CLIPS_STORAGE_KEY);
     if (!stored) return;
@@ -122,8 +132,10 @@ function StitchPage() {
   const [previewActive, setPreviewActive] = useState(false);
   const [previewIndex, setPreviewIndex] = useState(0);
   const [logs, setLogs] = useState<string[]>([]);
-  const [progress, setProgress] = useState(0);
+  const [progress, setProgress] = useState({ percent: 0, etc: '' });
   const [isStitching, setIsStitching] = useState(false);
+  const [activeJobId, setActiveJobId] = useState<string | null>(null);
+  const [stitchResult, setStitchResult] = useState<{ url: string; fileName: string } | null>(null);
   const [socket, setSocket] = useState<Socket | null>(null);
   const [youtubeReady, setYoutubeReady] = useState(false);
 
@@ -140,7 +152,7 @@ function StitchPage() {
   const totalDuration = clips.reduce((sum, c) => sum + Math.max(0, c.trimEnd - c.trimStart), 0);
 
   useEffect(() => {
-    loadClips(setClips);
+    loadClipsFromStorage(setClips);
   }, []);
 
   useEffect(() => {
@@ -160,28 +172,46 @@ function StitchPage() {
       reconnection: true,
       reconnectionDelay: 1000,
       reconnectionDelayMax: 5000,
-      reconnectionAttempts: 5
+      reconnectionAttempts: 10
     });
     setSocket(newSocket);
 
-    newSocket.on('stitch:log', (msg: string) => {
+    newSocket.on('connect', () => {
+      const savedJobId = localStorage.getItem(ACTIVE_JOB_KEY);
+      if (savedJobId) {
+        newSocket.emit('stitch:attach', savedJobId);
+      }
+    });
+
+    newSocket.on('stitch:attached', (data) => {
+      setActiveJobId(data.jobId);
+      setIsStitching(!data.result && !data.error);
+      if (data.progress) setProgress(data.progress);
+      if (data.logs) setLogs(data.logs);
+      if (data.result) setStitchResult(data.result);
+    });
+
+    newSocket.on('stitch:log', (data: any) => {
+      const msg = typeof data === 'string' ? data : (data.msg || JSON.stringify(data));
       setLogs((prev) => [...prev.slice(-100), msg]);
     });
 
-    newSocket.on('stitch:progress', (p: number) => {
-      setProgress(p);
+    newSocket.on('stitch:progress', (data: any) => {
+      setProgress({ percent: data.percent, etc: data.etc });
     });
 
-    newSocket.on('stitch:complete', (data: { url: string; fileName: string }) => {
+    newSocket.on('stitch:complete', (data: any) => {
       setIsStitching(false);
-      setProgress(100);
-      setLogs((prev) => [...prev, 'STITCH COMPLETE! Opening in new tab...']);
-      window.open(data.url, '_blank');
+      setProgress({ percent: 100, etc: 'Done!' });
+      setStitchResult(data);
+      localStorage.removeItem(ACTIVE_JOB_KEY);
+      setLogs((prev) => [...prev, 'STITCH COMPLETE!']);
     });
 
-    newSocket.on('stitch:error', (err: string) => {
+    newSocket.on('stitch:error', (data: any) => {
       setIsStitching(false);
-      setLogs((prev) => [...prev, `ERROR: ${err}`]);
+      setLogs((prev) => [...prev, `ERROR: ${data.error}`]);
+      localStorage.removeItem(ACTIVE_JOB_KEY);
     });
 
     return () => {
@@ -295,6 +325,23 @@ function StitchPage() {
     });
   };
 
+  const resetProject = () => {
+    if (clips.length === 0) return;
+    if (window.confirm('Are you sure you want to reset the entire project? All clips will be removed.')) {
+      clips.forEach((c) => {
+        if (c.objectUrl) URL.revokeObjectURL(c.objectUrl);
+        if (c.type === 'youtube' && ytPlayerRefs.current[c.id]) {
+          ytPlayerRefs.current[c.id].destroy();
+          delete ytPlayerRefs.current[c.id];
+        }
+      });
+      fileClipCache.clear();
+      setClips([]);
+      localStorage.removeItem(CLIPS_STORAGE_KEY);
+      stopPreview();
+    }
+  };
+
   const moveClip = (id: string, direction: 'up' | 'down') => {
     setClips((prev) => {
       const idx = prev.findIndex((c) => c.id === id);
@@ -325,9 +372,8 @@ function StitchPage() {
   };
 
   const startPreview = () => {
-    // Clear stitch state so the log section disappears and UI is clean
     setLogs([]);
-    setProgress(0);
+    setProgress({ percent: 0, etc: '' });
     setIsStitching(false);
     setPreviewActive(true);
     setPreviewIndex(0);
@@ -453,47 +499,49 @@ function StitchPage() {
   const startStitch = async () => {
     if (clips.length < 2 || !socket) return;
     setIsStitching(true);
+    setStitchResult(null);
     setLogs(['Starting stitch...']);
-    setProgress(0);
-
-    const clipsToStitch = await Promise.all(
-      clips.map(async (clip) => {
-        if (clip.type === 'file' && !clip.uploadedPath && clip.file) {
-          const formData = new FormData();
-          formData.append('file', clip.file);
-          const res = await fetch('/api/stitch/upload-file', {
-            method: 'POST',
-            body: formData
-          });
-          const data = await res.json();
-          if (!res.ok) throw new Error(data.error);
-          return { ...clip, uploadedPath: data.uploadedPath };
-        }
-        return clip;
-      })
-    );
-
-    const payload = {
-      socketId: socket.id,
-      clips: clipsToStitch.map((c) => ({
-        type: c.type,
-        uploadedPath: c.uploadedPath,
-        youtubeUrl: c.youtubeUrl,
-        trimStart: c.trimStart,
-        trimEnd: c.trimEnd
-      }))
-    };
+    setProgress({ percent: 0, etc: 'Starting...' });
 
     try {
+      const clipsToStitch = await Promise.all(
+        clips.map(async (clip) => {
+          if (clip.type === 'file' && !clip.uploadedPath && clip.file) {
+            const formData = new FormData();
+            formData.append('file', clip.file);
+            const res = await fetch('/api/stitch/upload-file', {
+              method: 'POST',
+              body: formData
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error);
+            return { ...clip, uploadedPath: data.uploadedPath };
+          }
+          return clip;
+        })
+      );
+
       const res = await fetch('/api/stitch/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+        body: JSON.stringify({
+          socketId: socket.id,
+          clips: clipsToStitch.map((c) => ({
+            type: c.type,
+            uploadedPath: c.uploadedPath,
+            youtubeUrl: c.youtubeUrl,
+            trimStart: c.trimStart,
+            trimEnd: c.trimEnd
+          }))
+        })
       });
       const data = await res.json();
       if (!res.ok) {
         setLogs((prev) => [...prev, `Error: ${data.error}`]);
         setIsStitching(false);
+      } else {
+        setActiveJobId(data.jobId);
+        localStorage.setItem(ACTIVE_JOB_KEY, data.jobId);
       }
     } catch (err: any) {
       setLogs((prev) => [...prev, `Failed: ${err.message}`]);
@@ -502,8 +550,32 @@ function StitchPage() {
   };
 
   const currentClip = clips[previewIndex];
+  const [globalElapsed, setGlobalElapsed] = useState(0);
 
-  // Check if any file clip is missing its objectUrl (file lost after page reload)
+  useEffect(() => {
+    if (!previewActive) {
+      setGlobalElapsed(0);
+      return;
+    }
+
+    const interval = setInterval(() => {
+      let elapsed = 0;
+      for (let i = 0; i < previewIndex; i++) {
+        elapsed += (clips[i].trimEnd - clips[i].trimStart);
+      }
+      if (currentClip) {
+        if (currentClip.type === 'file' && previewVideoRef.current) {
+          elapsed += Math.max(0, previewVideoRef.current.currentTime - currentClip.trimStart);
+        } else if (currentClip.type === 'youtube' && previewYtPlayerRef.current && previewYtPlayerRef.current.getCurrentTime) {
+          elapsed += Math.max(0, previewYtPlayerRef.current.getCurrentTime() - currentClip.trimStart);
+        }
+      }
+      setGlobalElapsed(elapsed);
+    }, 250);
+
+    return () => clearInterval(interval);
+  }, [previewActive, previewIndex, clips, currentClip]);
+
   const hasOrphanedClips = clips.some((c) => c.type === 'file' && !c.objectUrl);
 
   return (
@@ -511,6 +583,9 @@ function StitchPage() {
       <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <h1><Film /> Stitch Files</h1>
         <div style={{ display: 'flex', gap: '8px' }}>
+          <button onClick={resetProject} className="secondary" title="Reset everything and start over" style={{ color: '#ff6b6b' }}>
+            🗑 Reset
+          </button>
           <button onClick={saveProject} className="secondary" title="Download project as JSON">
             💾 Save Project
           </button>
@@ -529,13 +604,29 @@ function StitchPage() {
 
       {previewActive && (
         <div className="preview-player-section">
-          <div className="preview-controls">
-            <span className="preview-clip-info">
-              Clip {previewIndex + 1} of {clips.length}: {currentClip?.title}
-            </span>
-            <button onClick={stopPreview} className="secondary">
-              Stop Preview
-            </button>
+          <div className="preview-controls-enhanced">
+            <div className="preview-top-row">
+              <span className="preview-clip-count">
+                Clip <span className="highlight-text">{previewIndex + 1}</span> of <span className="highlight-text">{clips.length}</span>
+              </span>
+              <span className="preview-clip-title-truncated" title={currentClip?.title}>
+                {currentClip?.title}
+              </span>
+              <button onClick={stopPreview} className="secondary mini-btn">
+                Stop
+              </button>
+            </div>
+            
+            <div className="preview-details-row">
+              <div className="preview-portion-info">
+                Selected: <span className="highlight-text">{formatTimestamp(currentClip?.trimStart || 0, currentClip?.duration)}</span> - <span className="highlight-text">{formatTimestamp(currentClip?.trimEnd || 0, currentClip?.duration)}</span>
+                <span className="preview-duration-badge">({formatTimestamp((currentClip?.trimEnd || 0) - (currentClip?.trimStart || 0), currentClip?.duration)})</span>
+              </div>
+              <div className="preview-global-progress">
+                <span className="highlight-text">{formatTimestamp(globalElapsed, totalDuration)}</span> / {formatTimestamp(totalDuration, totalDuration)}
+              </div>
+
+            </div>
           </div>
 
           {currentClip?.type === 'file' ? (
@@ -626,7 +717,7 @@ function StitchPage() {
 
           <div className="stitch-footer">
             <div className="total-duration-label">
-              Total: {formatTimestamp(totalDuration)}
+              Total: {formatTimestamp(totalDuration, totalDuration)}
             </div>
             {clips.length >= 2 && (
               <>
@@ -646,22 +737,49 @@ function StitchPage() {
         </>
       )}
 
-      {(isStitching || logs.length > 0) && (
+      {(isStitching || logs.length > 0 || stitchResult) && (
         <div className="status-section">
           <div className="status-header">
-            <h3><Terminal size={18} /> Process Logs</h3>
+            <h3><Terminal size={18} /> Process Status</h3>
             {isStitching && <span className="badge">Active</span>}
           </div>
+          
+          {(isStitching || progress.percent > 0) && (
+            <div className="progress-details-panel" style={{ marginBottom: '16px', background: 'rgba(0,0,0,0.2)', padding: '12px', borderRadius: '8px' }}>
+              <div className="progress-metrics" style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', fontSize: '0.9rem' }}>
+                <div className="progress-percent-label">
+                  Progress: <span className="highlight-text">{progress.percent}%</span>
+                </div>
+                {isStitching && progress.etc && (
+                  <div className="progress-etc-label">
+                    Est. remaining: <span className="highlight-text">{progress.etc}</span>
+                  </div>
+                )}
+              </div>
+              <div className="progress-bar-container">
+                <div className="progress-bar-fill" style={{ width: `${progress.percent}%` }} />
+              </div>
+            </div>
+          )}
+
+          {stitchResult && (
+            <div className="result-panel" style={{ marginBottom: '16px', padding: '16px', background: 'rgba(81, 207, 102, 0.1)', border: '1px solid rgba(81, 207, 102, 0.3)', borderRadius: '8px', textAlign: 'center' }}>
+              <div className="result-message" style={{ color: '#51cf66', fontWeight: '600', marginBottom: '12px' }}>✓ Stitching finished successfully!</div>
+              <button 
+                onClick={() => window.open(stitchResult.url, '_blank')} 
+                className="primary"
+                style={{ width: '100%' }}
+              >
+                📥 Download Output Video
+              </button>
+            </div>
+          )}
+
           <div className="progress-section" ref={logContainerRef}>
             {logs.map((log, i) => (
               <div key={i} className="log-entry">{log}</div>
             ))}
           </div>
-          {isStitching && (
-            <div className="progress-bar-container">
-              <div className="progress-bar-fill" style={{ width: `${progress}%` }} />
-            </div>
-          )}
         </div>
       )}
     </div>
@@ -677,7 +795,7 @@ interface TimestampInputProps {
 }
 
 function TimestampInput({ value, onChange, maxDuration, label, minValue = 0 }: TimestampInputProps) {
-  const [displayValue, setDisplayValue] = useState(formatTimestamp(value));
+  const [displayValue, setDisplayValue] = useState(formatTimestamp(value, maxDuration));
   const [isFocused, setIsFocused] = useState(false);
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -689,19 +807,19 @@ function TimestampInput({ value, onChange, maxDuration, label, minValue = 0 }: T
     const parsed = parseTimestamp(displayValue);
 
     if (parsed === null) {
-      setDisplayValue(formatTimestamp(value));
+      setDisplayValue(formatTimestamp(value, maxDuration));
     } else {
       const clamped = Math.max(minValue, Math.min(maxDuration, parsed));
       onChange(clamped);
-      setDisplayValue(formatTimestamp(clamped));
+      setDisplayValue(formatTimestamp(clamped, maxDuration));
     }
   };
 
   useEffect(() => {
     if (!isFocused) {
-      setDisplayValue(formatTimestamp(value));
+      setDisplayValue(formatTimestamp(value, maxDuration));
     }
-  }, [value, isFocused]);
+  }, [value, isFocused, maxDuration]);
 
   return (
     <div className="trim-row">
@@ -712,8 +830,8 @@ function TimestampInput({ value, onChange, maxDuration, label, minValue = 0 }: T
         onChange={handleChange}
         onFocus={() => setIsFocused(true)}
         onBlur={handleBlur}
-        placeholder="HH:MM:SS"
-        title="HH:MM:SS or HH:MM:SS.MS (e.g., 01:30:45 or 1:30)"
+        placeholder={maxDuration >= 3600 ? "HH:MM:SS" : "MM:SS"}
+        title="HH:MM:SS, MM:SS or SS.MS"
         style={{ flex: 1, width: '100px' }}
       />
     </div>
@@ -839,12 +957,17 @@ function ClipCard({
           </button>
         </div>
 
-        <div style={{ fontSize: '0.85rem', color: 'var(--text-dim)' }}>
-          Total: {formatTimestamp(clip.duration)}
+        <div className="clip-duration-row">
+          <div className="clip-total-duration">
+            Total: {formatTimestamp(clip.duration, clip.duration)}
+          </div>
+          <div className="clip-selected-duration">
+            Selected: <span className="highlight-text">{formatTimestamp(trimmedDuration, clip.duration)}</span>
+          </div>
         </div>
 
-        <div className="trim-controls">
-          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+        <div className="trim-controls-horizontal">
+          <div className="trim-input-group">
             <TimestampInput
               value={clip.trimStart}
               onChange={(v) => onTrimChange('trimStart', v)}
@@ -857,7 +980,7 @@ function ClipCard({
             </button>
           </div>
 
-          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+          <div className="trim-input-group">
             <TimestampInput
               value={clip.trimEnd}
               onChange={(v) => onTrimChange('trimEnd', v)}
@@ -868,10 +991,6 @@ function ClipCard({
             <button className="trim-set-btn" onClick={() => onTrimChange('trimEnd', getCurrentTime())} title="Set to current time">
               ↑
             </button>
-          </div>
-
-          <div className="clip-selected-duration">
-            Selected: {formatTimestamp(trimmedDuration)}
           </div>
         </div>
       </div>

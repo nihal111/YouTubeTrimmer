@@ -44,6 +44,35 @@ if (!fs.existsSync(UPLOADS_DIR)) {
   fs.mkdirSync(UPLOADS_DIR);
 }
 
+// Track active stitch jobs for persistence
+const activeJobs = new Map();
+
+// Helper to notify all interested sockets about a job's progress
+function notifyJob(jobId, type, data) {
+  const job = activeJobs.get(jobId);
+  if (!job) return;
+  
+  // Update internal job state
+  if (type === 'stitch:progress') job.progress = data;
+  if (type === 'stitch:log') {
+    job.logs.push(data);
+    if (job.logs.length > 200) job.logs.shift();
+  }
+  if (type === 'stitch:complete') job.result = data;
+  if (type === 'stitch:error') job.error = data;
+
+  // Emit to all sockets registered for this jobId
+  job.sockets.forEach(sid => {
+    const s = io.sockets.sockets.get(sid);
+    if (s) s.emit(type, { jobId, ...data });
+  });
+
+  if (type === 'stitch:complete' || type === 'stitch:error') {
+    // Keep job around for a bit so client can "collect" it if they reconnect late
+    setTimeout(() => activeJobs.delete(jobId), 600000); // 10 minutes
+  }
+}
+
 // Multer configuration for file uploads
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, UPLOADS_DIR),
@@ -131,26 +160,46 @@ app.post('/api/stitch/upload-file', (req, res, next) => {
 // Stitch start endpoint (initiate stitching with mixed sources)
 app.post('/api/stitch/start', express.json(), (req, res) => {
   const { socketId, clips } = req.body;
-  const targetSocket = io.sockets.sockets.get(socketId);
-
-  if (!targetSocket) {
-    return res.status(400).json({ error: 'Socket connection not found' });
-  }
 
   if (!clips || !Array.isArray(clips) || clips.length < 2) {
     return res.status(400).json({ error: 'At least 2 clips are required' });
   }
 
-  console.log(`[STITCH] Start request from ${socketId}: ${clips.length} clips`);
-  res.json({ ok: true });
+  const jobId = `stitch_${Date.now()}`;
+  const job = {
+    id: jobId,
+    clips,
+    sockets: [socketId],
+    progress: { percent: 0, etc: 'Calculating...' },
+    logs: [],
+    startTime: Date.now()
+  };
+  activeJobs.set(jobId, job);
+
+  console.log(`[STITCH] Start request for ${jobId}: ${clips.length} clips`);
+  res.json({ ok: true, jobId });
 
   // Process asynchronously
-  setImmediate(() => runStitch(targetSocket, clips));
+  setImmediate(() => runStitch(jobId, clips));
 });
 
 io.on('connection', (socket) => {
   const socketId = socket.id;
   console.log(`[Socket] Client connected: ${socketId}`);
+
+  socket.on('stitch:attach', (jobId) => {
+    const job = activeJobs.get(jobId);
+    if (job) {
+      if (!job.sockets.includes(socketId)) job.sockets.push(socketId);
+      socket.emit('stitch:attached', {
+        jobId,
+        progress: job.progress,
+        logs: job.logs,
+        result: job.result,
+        error: job.error
+      });
+    }
+  });
 
   socket.on('start-download', (data) => {
     const { url, start, end, format, resolution } = data;
@@ -221,16 +270,16 @@ io.on('connection', (socket) => {
   });
 });
 
-// Run a child process and pipe stdout/stderr to socket logs
-function runCommand(socket, cmd, args) {
+// Run a child process and pipe stdout/stderr to job logs
+function runCommand(jobId, cmd, args) {
   return new Promise((resolve, reject) => {
     let errorOutput = '';
     const child = spawn(cmd, args);
-    child.stdout.on('data', (data) => socket.emit('stitch:log', data.toString()));
+    child.stdout.on('data', (data) => notifyJob(jobId, 'stitch:log', data.toString()));
     child.stderr.on('data', (data) => {
       const msg = data.toString();
       errorOutput += msg;
-      socket.emit('stitch:log', msg);
+      notifyJob(jobId, 'stitch:log', msg);
     });
     child.on('close', (code) => {
       if (code === 0) resolve();
@@ -241,24 +290,16 @@ function runCommand(socket, cmd, args) {
 }
 
 // Stitch function - concatenates multiple clips (file or YouTube) with per-clip trimming
-async function runStitch(socket, clips) {
-  const jobId = `stitch_${Date.now()}`;
+async function runStitch(jobId, clips) {
   const outputFileName = `${jobId}.mp4`;
   const outputPath = path.join(DOWNLOADS_DIR, outputFileName);
   const intermediates = [];
   const filesToCleanup = [];
+  const startTime = Date.now();
 
   try {
-    socket.emit('stitch:log', `Processing ${clips.length} clips...`);
+    notifyJob(jobId, 'stitch:log', `Processing ${clips.length} clips...`);
 
-    // Step 1: For each clip, produce a trimmed + timestamp-normalized intermediate.
-    // Each yt-dlp clip carries absolute timestamps from the source video's position
-    // (e.g. a clip at 10:00 has PTS ~600s). The concat demuxer adds these offsets
-    // instead of resetting them, producing a 12-minute output with 5-minute frozen gaps.
-    // Fix: after yt-dlp download, re-encode each clip with setpts=PTS-STARTPTS to reset
-    // timestamps to 0 AND scale to a consistent 1920x1080 (different source resolutions
-    // trigger filter-graph reconfiguration during concat, dropping hundreds of frames).
-    // After normalization, stream-copy concat is safe and fast.
     const NORMALIZE_VF = 'scale=1920:1080:force_original_aspect_ratio=decrease:force_divisible_by=2,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,fps=30,setpts=PTS-STARTPTS';
 
     for (let i = 0; i < clips.length; i++) {
@@ -266,11 +307,26 @@ async function runStitch(socket, clips) {
       const intermediatePath = path.join(UPLOADS_DIR, `${jobId}_clip_${i}.mp4`);
       intermediates.push(intermediatePath);
 
-      socket.emit('stitch:log', `[${i + 1}/${clips.length}] Processing ${clip.type}...`);
-      socket.emit('stitch:progress', Math.round((i / clips.length) * 60));
+      notifyJob(jobId, 'stitch:log', `[${i + 1}/${clips.length}] Processing ${clip.type}...`);
+      
+      // Calculate progress and ETC
+      const percent = Math.round((i / (clips.length + 0.5)) * 100); 
+      const elapsed = Date.now() - startTime;
+      const avgTimePerClip = i > 0 ? elapsed / i : 0;
+      const remainingClips = clips.length - i;
+      let etc = 'Calculating...';
+      if (i > 0) {
+        const remainingTimeMs = (avgTimePerClip * remainingClips) + (avgTimePerClip * 0.2); 
+        const remainingSecs = Math.ceil(remainingTimeMs / 1000);
+        etc = remainingSecs > 60 
+          ? `${Math.floor(remainingSecs / 60)}m ${remainingSecs % 60}s`
+          : `${remainingSecs}s`;
+      }
+      
+      notifyJob(jobId, 'stitch:progress', { percent, etc });
 
       if (clip.type === 'file') {
-        await runCommand(socket, 'ffmpeg', [
+        await runCommand(jobId, 'ffmpeg', [
           '-y',
           '-ss', String(clip.trimStart),
           '-to', String(clip.trimEnd),
@@ -286,7 +342,7 @@ async function runStitch(socket, clips) {
         const rawPath = path.join(UPLOADS_DIR, `${jobId}_clip_${i}_raw.mp4`);
         filesToCleanup.push(rawPath);
 
-        await runCommand(socket, 'yt-dlp', [
+        await runCommand(jobId, 'yt-dlp', [
           '--download-sections', `*${clip.trimStart}-${clip.trimEnd}`,
           '--force-keyframes-at-cuts',
           '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
@@ -295,8 +351,8 @@ async function runStitch(socket, clips) {
           clip.youtubeUrl
         ]);
 
-        socket.emit('stitch:log', `[${i + 1}/${clips.length}] Normalizing (scale + timestamps)...`);
-        await runCommand(socket, 'ffmpeg', [
+        notifyJob(jobId, 'stitch:log', `[${i + 1}/${clips.length}] Normalizing (scale + timestamps)...`);
+        await runCommand(jobId, 'ffmpeg', [
           '-y',
           '-i', rawPath,
           '-c:v', 'libx264', '-preset', 'fast',
@@ -309,21 +365,16 @@ async function runStitch(socket, clips) {
       }
     }
 
-    socket.emit('stitch:progress', 80);
-    socket.emit('stitch:log', 'Concatenating clips...');
+    notifyJob(jobId, 'stitch:progress', { percent: 95, etc: 'Finishing...' });
+    notifyJob(jobId, 'stitch:log', 'Concatenating clips...');
 
-    // Step 2: Write concat list with all intermediates
     const concatListPath = path.join(UPLOADS_DIR, `${jobId}_list.txt`);
     const concatContent = intermediates.map((p) => `file '${p}'`).join('\n');
 
     fs.writeFileSync(concatListPath, concatContent);
     filesToCleanup.push(concatListPath);
 
-    // Step 3: Stream-copy concat — all intermediates are now identical format
-    // (1920x1080 h264/aac 30fps, timestamps starting at 0) so no re-encode needed.
-    socket.emit('stitch:log', '[ffmpeg] concatenating normalized clips (stream copy)');
-    console.log(`[STITCH] Running: ffmpeg concat stream copy`);
-    await runCommand(socket, 'ffmpeg', [
+    await runCommand(jobId, 'ffmpeg', [
       '-y',
       '-f', 'concat',
       '-safe', '0',
@@ -332,15 +383,15 @@ async function runStitch(socket, clips) {
       outputPath
     ]);
 
-    socket.emit('stitch:progress', 100);
-    socket.emit('stitch:complete', {
+    notifyJob(jobId, 'stitch:progress', { percent: 100, etc: 'Done!' });
+    notifyJob(jobId, 'stitch:complete', {
       url: `/downloads/${outputFileName}`,
       fileName: outputFileName
     });
     console.log(`[STITCH] Completed: ${outputFileName}`);
   } catch (err) {
     console.error(`[STITCH] Error: ${err.message}`);
-    socket.emit('stitch:error', err.message);
+    notifyJob(jobId, 'stitch:error', { error: err.message });
   } finally {
     const toDelete = [
       ...intermediates,

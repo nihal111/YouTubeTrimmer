@@ -13,7 +13,7 @@ A local web app for trimming YouTube videos and stitching multiple clips (from Y
 ### Stitch (`/stitch`)
 - Add clips from two sources: YouTube URL or local file upload
 - Each clip has its own embedded player (YouTube iframe or HTML5 video)
-- Per-clip trim controls in `HH:MM:SS` format — editable text fields that validate on blur and reset gracefully on bad input
+- Per-clip trim controls in `MM:SS` or `HH:MM:SS` format — editable text fields that validate on blur and reset gracefully on bad input
 - Reorder clips up/down
 - Preview mode: plays all clips in order (respecting trim points) in the browser, no encoding required
 - Stitch: encodes and concatenates all clips into a single MP4
