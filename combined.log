@@ -14,31 +14,52 @@
 [0] > youtube-trimmer-server@1.0.0 start
 [0] > node index.js
 [0] 
-[0] node:events:487
-[0]       throw er; // Unhandled 'error' event
-[0]       ^
-[0] 
-[0] Error: listen EADDRINUSE: address already in use 0.0.0.0:3001
-[0]     at Server.setupListenHandle [as _listen2] (node:net:2008:16)
-[0]     at listenInCluster (node:net:2065:12)
-[0]     at node:net:2274:7
-[0]     at process.processTicksAndRejections (node:internal/process/task_queues:90:21)
-[0] Emitted 'error' event on Server instance at:
-[0]     at emitErrorNT (node:net:2044:8)
-[0]     at process.processTicksAndRejections (node:internal/process/task_queues:90:21) {
-[0]   code: 'EADDRINUSE',
-[0]   errno: -48,
-[0]   syscall: 'listen',
-[0]   address: '0.0.0.0',
-[0]   port: 3001
-[0] }
-[0] 
-[0] Node.js v25.9.0
-[1] Port 5173 is in use, trying another one...
-[0] npm run start:server exited with code 1
+[0] Server running on http://0.0.0.0:3001
 [1] 
-[1]   VITE v8.0.10  ready in 110 ms
+[1]   VITE v8.0.10  ready in 153 ms
 [1] 
-[1]   ➜  Local:   http://localhost:5174/
-[1]   ➜  Network: http://10.0.0.56:5174/
-[1]   ➜  Network: http://100.89.5.62:5174/
+[1]   ➜  Local:   http://localhost:5173/
+[1]   ➜  Network: http://10.0.0.56:5173/
+[1]   ➜  Network: http://100.89.5.62:5173/
+[0] [API] Info request for URL: undefined
+[0] [Socket] Client connected: PyX5YBi4N_c2tTvZAAAC
+[0] Client disconnected
+[0] [Socket] Client connected: 93Vz-n4dIWGkzMGVAAAF
+[1] 7:25:14 PM [vite] (client) [Unhandled error] TypeError: can't access property "name", file is undefined
+[1]  > StitchPage/<.children<.children<.children< src/StitchPage.tsx:182:9
+[1]     180 |              <button
+[1]     181 |                className="download-btn"
+[1]     182 |                onClick={startStitch}
+[1]         |           ^
+[1]     183 |                disabled={isStitching}
+[1]     184 |                style={{ width: '100%' }}
+[1]  > StitchPage src/StitchPage.tsx:148:19
+[1]  > react_stack_bottom_frame node_modules/react-dom/cjs/react-dom-client.development.js:25904:19
+[1]  > renderWithHooks node_modules/react-dom/cjs/react-dom-client.development.js:7662:40
+[1]  > updateFunctionComponent node_modules/react-dom/cjs/react-dom-client.development.js:10166:18
+[1]  > beginWork node_modules/react-dom/cjs/react-dom-client.development.js:11778:17
+[1]  > runWithFiberInDEV node_modules/react-dom/cjs/react-dom-client.development.js:874:12
+[1]  > performUnitOfWork node_modules/react-dom/cjs/react-dom-client.development.js:17641:21
+[1]  > workLoopSync node_modules/react-dom/cjs/react-dom-client.development.js:17469:58
+[1]  > renderRootSync node_modules/react-dom/cjs/react-dom-client.development.js:17450:10
+[1]  > performWorkOnRoot node_modules/react-dom/cjs/react-dom-client.development.js:16583:34
+[1]  > performSyncWorkOnRoot node_modules/react-dom/cjs/react-dom-client.development.js:18972:24
+[1]  > flushSyncWorkAcrossRoots_impl node_modules/react-dom/cjs/react-dom-client.development.js:18814:20
+[1]  > flushSyncWork$1 node_modules/react-dom/cjs/react-dom-client.development.js:16898:11
+[1]  > batchedUpdates$1 node_modules/react-dom/cjs/react-dom-client.development.js:3263:13
+[1]  > dispatchEventForPluginEventSystem node_modules/react-dom/cjs/react-dom-client.development.js:19320:23
+[1]  > dispatchEvent node_modules/react-dom/cjs/react-dom-client.development.js:23586:12
+[1]  > dispatchDiscreteEvent node_modules/react-dom/cjs/react-dom-client.development.js:23553:10
+[1] 
+[1] 7:25:14 PM [vite] (client) [console.warn] An error occurred in the <StitchPage> component.
+[1] 
+[1] Consider adding an error boundary to your tree to customize error handling behavior.
+[1] Visit https://react.dev/link/error-boundaries to learn more about error boundaries.
+[1] 
+[0] Client disconnected
+[1] 7:27:08 PM [vite] (client) hmr update /src/StitchPage.tsx
+[1] 7:27:10 PM [vite] (client) hmr update /src/StitchPage.tsx
+[1] 7:27:13 PM [vite] (client) hmr update /src/StitchPage.tsx
+[1] 7:27:21 PM [vite] (client) hmr update /src/StitchPage.tsx
+[1] 7:27:23 PM [vite] (client) hmr update /src/StitchPage.tsx
+[1] 7:27:26 PM [vite] (client) hmr update /src/StitchPage.tsx

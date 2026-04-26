@@ -64,11 +64,10 @@ function StitchPage() {
   };
 
   const handleAddFile = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      setFiles((prev) => [...prev, e.target.files![0]]);
-      if (addFileInputRef.current) {
-        addFileInputRef.current.value = '';
-      }
+    const file = e.target.files?.[0];
+    if (file) {
+      setFiles((prev) => [...prev, file]);
+      e.target.value = '';
     }
   };
 
@@ -164,8 +163,7 @@ function StitchPage() {
             className="stitch-add-btn"
             onClick={() => addFileInputRef.current?.click()}
           >
-            <Plus size={20} style={{ display: 'inline', marginRight: '8px' }} />
-            Add File
+            + Add File
           </button>
 
           <input
