@@ -346,7 +346,7 @@ function TrimPage() {
   return (
     <div className="container">
       <header>
-        <h1><Video /> YouTubeTrimmer</h1>
+        <h1><Video /> YouTubeTailor</h1>
         {youtubeStatus && (
           <div style={{ fontSize: '0.85rem', color: youtubeStatus.includes('✗') ? '#ff6b6b' : youtubeStatus.includes('✓') ? '#51cf66' : '#aaaaaa', marginTop: '8px' }}>
             {youtubeStatus}

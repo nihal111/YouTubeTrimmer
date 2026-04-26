@@ -1,4 +1,4 @@
-# YouTube Trimmer
+# YouTube Tailor
 
 A local web app for trimming YouTube videos and stitching multiple clips (from YouTube or uploaded files) into a single output video. Runs entirely on your machine — no cloud, no upload limits.
 
@@ -86,7 +86,7 @@ The client proxies all `/api`, `/socket.io`, and `/downloads` requests to the se
 ## Project Structure
 
 ```
-YouTubeTrimmer/
+YouTubeTailor/
 ├── client/                  # React frontend (Vite)
 │   └── src/
 │       ├── App.tsx          # Nav + routing
