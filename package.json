@@ -4,10 +4,11 @@
   "scripts": {
     "start:server": "cd server && npm start",
     "start:client": "cd client && npm run dev",
-    "dev": "npx concurrently \"npm run start:server\" \"npm run start:client\"",
+    "dev": "npx concurrently \"npm run start:server\" \"npm run start:client\" > combined.log 2>&1",
     "install:all": "cd server && npm install && cd ../client && npm install"
   },
   "devDependencies": {
+    "@playwright/test": "^1.59.1",
     "concurrently": "^8.2.1"
   }
 }
