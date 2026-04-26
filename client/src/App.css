@@ -243,24 +243,47 @@ button.secondary:hover {
 
 .timeline-label {
   position: absolute;
-  font-size: 0.7rem;
+  font-size: 0.75rem;
   color: var(--text-dim);
-  pointer-events: none;
   white-space: nowrap;
   transform: translateX(-50%);
+  padding: 8px 16px;
+  border-radius: 6px;
+  font-weight: 600;
+  cursor: grab;
+  user-select: none;
+  transition: all 0.2s;
+  min-width: 80px;
+  text-align: center;
+}
+
+.timeline-label:active {
+  cursor: grabbing;
 }
 
 .timeline-label.start {
   color: #ffdc00;
-  font-weight: 600;
-  top: -18px;
+  background: rgba(255, 220, 0, 0.2);
+  border: 1px solid #ffdc00;
+  top: -40px;
+}
+
+.timeline-label.start:hover {
+  background: rgba(255, 220, 0, 0.3);
+  box-shadow: 0 0 8px rgba(255, 220, 0, 0.4);
 }
 
 .timeline-label.end {
   color: #64c8ff;
-  font-weight: 600;
+  background: rgba(100, 200, 255, 0.2);
+  border: 1px solid #64c8ff;
   top: auto;
-  bottom: -18px;
+  bottom: -40px;
+}
+
+.timeline-label.end:hover {
+  background: rgba(100, 200, 255, 0.3);
+  box-shadow: 0 0 8px rgba(100, 200, 255, 0.4);
 }
 
 .status-section {
@@ -340,12 +363,12 @@ button.secondary:hover {
     max-width: 100%;
     margin: 0;
   }
-  
+
   .time-grid {
     grid-template-columns: 1fr;
     gap: 12px;
   }
-  
+
   .options-grid {
     grid-template-columns: 1fr;
     gap: 12px;
@@ -358,5 +381,19 @@ button.secondary:hover {
   .video-section {
     border-radius: 0;
     margin: 0 -8px;
+  }
+
+  .timeline-label {
+    padding: 10px 20px;
+    min-width: 100px;
+    font-size: 0.8rem;
+  }
+
+  .timeline-label.start {
+    top: -50px;
+  }
+
+  .timeline-label.end {
+    bottom: -50px;
   }
 }

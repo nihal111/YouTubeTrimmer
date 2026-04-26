@@ -395,6 +395,10 @@ function App() {
                  style={{
                    left: `${(startTime / videoInfo.duration) * 100}%`
                  }}
+                 onMouseDown={(e) => {
+                   e.stopPropagation();
+                   handleTimelineMouseDown(e, 'start');
+                 }}
                >
                  {formatTimestamp(startTime)}
                </div>
@@ -425,6 +429,10 @@ function App() {
                  className="timeline-label end"
                  style={{
                    left: `${(endTime / videoInfo.duration) * 100}%`
+                 }}
+                 onMouseDown={(e) => {
+                   e.stopPropagation();
+                   handleTimelineMouseDown(e, 'end');
                  }}
                >
                  {formatTimestamp(endTime)}
