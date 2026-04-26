@@ -112,33 +112,40 @@ app.get('/api/info', async (req, res) => {
   }
 });
 
-// Stitch files upload endpoint
-app.post('/api/stitch/upload', (req, res, next) => {
-  upload.array('files', 20)(req, res, (err) => {
+// Stitch file upload endpoint (single file)
+app.post('/api/stitch/upload-file', (req, res, next) => {
+  upload.single('file')(req, res, (err) => {
     if (err) {
       return res.status(400).json({ error: `Upload error: ${err.message}` });
     }
     next();
   });
 }, (req, res) => {
-  const { socketId } = req.body;
+  if (!req.file) {
+    return res.status(400).json({ error: 'No file' });
+  }
+  console.log(`[STITCH] File uploaded: ${req.file.path}`);
+  res.json({ uploadedPath: req.file.path });
+});
+
+// Stitch start endpoint (initiate stitching with mixed sources)
+app.post('/api/stitch/start', express.json(), (req, res) => {
+  const { socketId, clips } = req.body;
   const targetSocket = io.sockets.sockets.get(socketId);
 
   if (!targetSocket) {
-    req.files?.forEach(f => fs.unlink(f.path, () => {}));
     return res.status(400).json({ error: 'Socket connection not found' });
   }
 
-  if (!req.files || req.files.length < 2) {
-    req.files?.forEach(f => fs.unlink(f.path, () => {}));
-    return res.status(400).json({ error: 'At least 2 files are required' });
+  if (!clips || !Array.isArray(clips) || clips.length < 2) {
+    return res.status(400).json({ error: 'At least 2 clips are required' });
   }
 
-  console.log(`[STITCH] Upload received from ${socketId}: ${req.files.length} files`);
+  console.log(`[STITCH] Start request from ${socketId}: ${clips.length} clips`);
   res.json({ ok: true });
 
   // Process asynchronously
-  setImmediate(() => runStitch(targetSocket, req.files, io));
+  setImmediate(() => runStitch(targetSocket, clips));
 });
 
 io.on('connection', (socket) => {
@@ -214,103 +221,162 @@ io.on('connection', (socket) => {
   });
 });
 
-// Stitch function - concatenates multiple video/audio files
-function runStitch(socket, uploadedFiles, ioServer) {
+// Stitch function - concatenates multiple clips (file or YouTube) with per-clip trimming
+async function runStitch(socket, clips) {
   const jobId = `stitch_${Date.now()}`;
-  const concatListPath = path.join(UPLOADS_DIR, `${jobId}_list.txt`);
   const outputFileName = `${jobId}.mp4`;
   const outputPath = path.join(DOWNLOADS_DIR, outputFileName);
-
-  // Write ffmpeg concat list
-  const listContent = uploadedFiles
-    .map(f => `file '${f.path}'`)
-    .join('\n');
+  const intermediates = [];
+  const filesToCleanup = [];
 
   try {
-    fs.writeFileSync(concatListPath, listContent);
+    socket.emit('stitch:log', `Processing ${clips.length} clips...`);
+
+    // Step 1: For each clip, produce a trimmed intermediate
+    for (let i = 0; i < clips.length; i++) {
+      const clip = clips[i];
+      const intermediatePath = path.join(UPLOADS_DIR, `${jobId}_clip_${i}.mp4`);
+      intermediates.push(intermediatePath);
+
+      socket.emit('stitch:log', `[${i + 1}/${clips.length}] Processing ${clip.type}...`);
+      socket.emit('stitch:progress', Math.round((i / clips.length) * 60));
+
+      await new Promise((resolve, reject) => {
+        let child;
+
+        if (clip.type === 'file') {
+          // Trim file clip
+          child = spawn('ffmpeg', [
+            '-y',
+            '-ss', String(clip.trimStart),
+            '-to', String(clip.trimEnd),
+            '-i', clip.uploadedPath,
+            '-c', 'copy',
+            intermediatePath
+          ]);
+        } else {
+          // Download and trim YouTube clip
+          child = spawn('yt-dlp', [
+            '--download-sections', `*${clip.trimStart}-${clip.trimEnd}`,
+            '--force-keyframes-at-cuts',
+            '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+            '--merge-output-format', 'mp4',
+            '-o', intermediatePath,
+            clip.youtubeUrl
+          ]);
+        }
+
+        let output = '';
+        let errorOutput = '';
+
+        child.stdout.on('data', (data) => {
+          const msg = data.toString();
+          output += msg;
+          socket.emit('stitch:log', msg);
+        });
+
+        child.stderr.on('data', (data) => {
+          const msg = data.toString();
+          errorOutput += msg;
+          socket.emit('stitch:log', msg);
+        });
+
+        child.on('close', (code) => {
+          if (code === 0) {
+            resolve();
+          } else {
+            reject(new Error(`Clip ${i + 1} failed (code ${code}): ${errorOutput}`));
+          }
+        });
+
+        child.on('error', (err) => {
+          reject(err);
+        });
+      });
+    }
+
+    socket.emit('stitch:progress', 65);
+    socket.emit('stitch:log', 'Concatenating clips...');
+
+    // Step 2: Write concat list with all intermediates
+    const concatListPath = path.join(UPLOADS_DIR, `${jobId}_list.txt`);
+    const concatContent = intermediates.map((p) => `file '${p}'`).join('\n');
+
+    fs.writeFileSync(concatListPath, concatContent);
+    filesToCleanup.push(concatListPath);
+
+    // Step 3: Concatenate with stream copy first, fallback to re-encode
+    await new Promise((resolve, reject) => {
+      const doConcat = (extraArgs, label) => {
+        const args = [
+          '-y',
+          '-f', 'concat',
+          '-safe', '0',
+          '-i', concatListPath,
+          ...extraArgs,
+          outputPath
+        ];
+
+        socket.emit('stitch:log', `[ffmpeg] ${label}`);
+        console.log(`[STITCH] Running: ffmpeg ${args.join(' ')}`);
+
+        const child = spawn('ffmpeg', args);
+
+        child.stderr.on('data', (data) => {
+          socket.emit('stitch:log', data.toString());
+        });
+
+        child.stdout.on('data', (data) => {
+          socket.emit('stitch:log', data.toString());
+        });
+
+        child.on('close', (code) => {
+          if (code === 0) {
+            resolve();
+          } else if (label === 'stream copy') {
+            socket.emit('stitch:log', 'Stream copy failed; retrying with re-encode...');
+            doConcat(
+              ['-c:v', 'libx264', '-c:a', 'aac', '-preset', 'fast'],
+              're-encode'
+            );
+          } else {
+            reject(new Error(`ffmpeg concat failed with code ${code}`));
+          }
+        });
+
+        child.on('error', (err) => {
+          reject(err);
+        });
+      };
+
+      doConcat(['-c', 'copy'], 'stream copy');
+    });
+
+    socket.emit('stitch:progress', 100);
+    socket.emit('stitch:complete', {
+      url: `/downloads/${outputFileName}`,
+      fileName: outputFileName
+    });
+    console.log(`[STITCH] Completed: ${outputFileName}`);
   } catch (err) {
-    socket.emit('stitch:error', `Failed to write concat list: ${err.message}`);
-    cleanup(uploadedFiles, concatListPath);
-    return;
-  }
-
-  socket.emit('stitch:log', `Starting stitch of ${uploadedFiles.length} files...`);
-  socket.emit('stitch:log', `Output: ${outputFileName}`);
-
-  const doRun = (extraArgs, label) => {
-    const args = [
-      '-y',
-      '-f', 'concat',
-      '-safe', '0',
-      '-i', concatListPath,
-      ...extraArgs,
-      outputPath
+    console.error(`[STITCH] Error: ${err.message}`);
+    socket.emit('stitch:error', err.message);
+  } finally {
+    // Cleanup all intermediates, uploaded files, and concat list
+    const toDelete = [
+      ...intermediates,
+      ...clips.filter((c) => c.type === 'file').map((c) => c.uploadedPath),
+      ...filesToCleanup
     ];
 
-    socket.emit('stitch:log', `[ffmpeg] ${label}`);
-    console.log(`[STITCH] Running: ffmpeg ${args.join(' ')}`);
-
-    const child = spawn('ffmpeg', args);
-
-    child.stderr.on('data', (data) => {
-      const msg = data.toString();
-      socket.emit('stitch:log', msg);
-    });
-
-    child.on('close', (code) => {
-      if (code === 0) {
-        // Success - cleanup and emit complete
-        uploadedFiles.forEach(f => {
-          fs.unlink(f.path, (err) => {
-            if (err) console.error(`Failed to delete upload: ${err.message}`);
-          });
-        });
-        fs.unlink(concatListPath, (err) => {
-          if (err) console.error(`Failed to delete concat list: ${err.message}`);
-        });
-
-        socket.emit('stitch:complete', {
-          url: `/downloads/${outputFileName}`,
-          fileName: outputFileName
-        });
-        console.log(`[STITCH] Completed: ${outputFileName}`);
-      } else if (label === 'stream copy') {
-        // First attempt failed - retry with re-encode
-        socket.emit('stitch:log', 'Stream copy failed; retrying with re-encode (slower)...');
-        doRun(['-c:v', 'libx264', '-c:a', 'aac', '-preset', 'fast'], 're-encode');
-      } else {
-        // Re-encode also failed
-        uploadedFiles.forEach(f => {
-          fs.unlink(f.path, (err) => {
-            if (err) console.error(`Failed to delete upload: ${err.message}`);
-          });
-        });
-        fs.unlink(concatListPath, (err) => {
-          if (err) console.error(`Failed to delete concat list: ${err.message}`);
-        });
-
-        socket.emit('stitch:error', `ffmpeg exited with code ${code}`);
-        console.error(`[STITCH] Failed with code ${code}`);
-      }
-    });
-  };
-
-  // Start with stream copy (fast, no re-encoding)
-  doRun(['-c', 'copy'], 'stream copy');
-}
-
-function cleanup(files, concatListPath) {
-  files.forEach(f => {
-    fs.unlink(f.path, (err) => {
-      if (err) console.error(`Failed to delete file: ${err.message}`);
-    });
-  });
-  if (concatListPath) {
-    fs.unlink(concatListPath, (err) => {
-      if (err) console.error(`Failed to delete concat list: ${err.message}`);
+    toDelete.forEach((p) => {
+      fs.unlink(p, (err) => {
+        if (err) console.error(`Failed to delete ${p}: ${err.message}`);
+      });
     });
   }
 }
+
 
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, '0.0.0.0', () => {
