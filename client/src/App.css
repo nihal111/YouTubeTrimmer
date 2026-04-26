@@ -192,6 +192,7 @@ button.secondary:hover {
   cursor: pointer;
   display: flex;
   align-items: center;
+  touch-action: none;
 }
 
 .timeline-range {
@@ -204,6 +205,7 @@ button.secondary:hover {
   cursor: grab;
   display: flex;
   flex-direction: column;
+  touch-action: none;
 }
 
 .timeline-range:active {
@@ -252,9 +254,9 @@ button.secondary:hover {
   font-weight: 600;
   cursor: grab;
   user-select: none;
-  transition: all 0.2s;
   min-width: 80px;
   text-align: center;
+  touch-action: none;
 }
 
 .timeline-label:active {
@@ -271,6 +273,7 @@ button.secondary:hover {
 .timeline-label.start:hover {
   background: rgba(255, 220, 0, 0.3);
   box-shadow: 0 0 8px rgba(255, 220, 0, 0.4);
+  transition: background 0.2s, box-shadow 0.2s;
 }
 
 .timeline-label.end {
@@ -284,6 +287,7 @@ button.secondary:hover {
 .timeline-label.end:hover {
   background: rgba(100, 200, 255, 0.3);
   box-shadow: 0 0 8px rgba(100, 200, 255, 0.4);
+  transition: background 0.2s, box-shadow 0.2s;
 }
 
 .status-section {
