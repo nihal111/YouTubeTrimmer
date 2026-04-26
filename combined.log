@@ -51,9 +51,10 @@
 [0] Running yt-dlp with args: --download-sections *54.67591127948027-92.44174690551303 --force-keyframes-at-cuts -o /Users/nihal/Code/YouTubeTrimmer/downloads/clip_1777234946027.mp4 https://youtu.be/W-hugXQIsJM?si=UqkPdyui-1x_64wj -f bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best --merge-output-format mp4
 [0] Client disconnected
 [0] [Socket] Client connected: BBkNU6_6xVlbiRhLAAAf
- (client) hmr update /src/StitchPage.tsx
-[1] 9:24:57 AM [vite] (client) hmr update /src/StitchPage.tsx
-[1] 9:25:00 AM [vite] (client) hmr update /src/StitchPage.tsx
+[0] Client disconnected
+[1] npm run start:client exited with code 143
+[0] npm run start:server exited with code SIGTERM
+ite] (client) hmr update /src/StitchPage.tsx
 [1] 9:25:08 AM [vite] (client) hmr update /src/StitchPage.tsx
 [1] 9:25:15 AM [vite] (client) hmr update /src/StitchPage.tsx
 [1] 9:25:18 AM [vite] (client) hmr update /src/StitchPage.tsx
@@ -90,3 +91,4 @@
 [1] 1:24:04 PM [vite] ws proxy socket error:
 [1] Error: read ECONNRESET
 [1]     at TCP.onStreamRead (node:internal/stream_base_commons:216:20)
+[1] npm run start:client exited with code 143

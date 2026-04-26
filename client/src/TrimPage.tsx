@@ -357,7 +357,7 @@ function TrimPage() {
   return (
     <div className="container">
       <header>
-        <h1><Video /> YouTubeTailor</h1>
+        <h1><Video /> YouTubeTailor <span style={{ fontSize: '0.6em', opacity: 0.7, fontWeight: 400, marginLeft: '8px', verticalAlign: 'middle' }}>Trimmer</span></h1>
         {youtubeStatus && (
           <div style={{ fontSize: '0.85rem', color: youtubeStatus.includes('✗') ? '#ff6b6b' : youtubeStatus.includes('✓') ? '#51cf66' : '#aaaaaa', marginTop: '8px' }}>
             {youtubeStatus}
@@ -545,6 +545,10 @@ function TrimPage() {
           ))}
         </div>
       )}
+
+      <footer style={{ marginTop: '40px', padding: '20px 0', textAlign: 'center', borderTop: '1px solid var(--border)', color: 'var(--text-dim)', fontSize: '0.85rem' }}>
+        <p>© {new Date().getFullYear()} <strong>YouTubeTailor</strong> — Handcrafted for perfect cuts.</p>
+      </footer>
     </div>
   );
 }

@@ -581,7 +581,7 @@ function StitchPage() {
   return (
     <div className="container">
       <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <h1><Film /> Stitch Files</h1>
+        <h1><Film /> YouTubeTailor <span style={{ fontSize: '0.6em', opacity: 0.7, fontWeight: 400, marginLeft: '8px', verticalAlign: 'middle' }}>Stitcher</span></h1>
         <div style={{ display: 'flex', gap: '8px' }}>
           <button onClick={resetProject} className="secondary" title="Reset everything and start over" style={{ color: '#ff6b6b' }}>
             🗑 Reset
@@ -599,60 +599,8 @@ function StitchPage() {
             onChange={handleProjectFileSelect}
             style={{ display: 'none' }}
           />
-        </div>
-      </header>
-
-      {previewActive && (
-        <div className="preview-player-section">
-          <div className="preview-controls-enhanced">
-            <div className="preview-top-row">
-              <span className="preview-clip-count">
-                Clip <span className="highlight-text">{previewIndex + 1}</span> of <span className="highlight-text">{clips.length}</span>
-              </span>
-              <span className="preview-clip-title-truncated" title={currentClip?.title}>
-                {currentClip?.title}
-              </span>
-              <button onClick={stopPreview} className="secondary mini-btn">
-                Stop
-              </button>
-            </div>
-            
-            <div className="preview-details-row">
-              <div className="preview-portion-info">
-                Selected: <span className="highlight-text">{formatTimestamp(currentClip?.trimStart || 0, currentClip?.duration)}</span> - <span className="highlight-text">{formatTimestamp(currentClip?.trimEnd || 0, currentClip?.duration)}</span>
-                <span className="preview-duration-badge">({formatTimestamp((currentClip?.trimEnd || 0) - (currentClip?.trimStart || 0), currentClip?.duration)})</span>
-              </div>
-              <div className="preview-global-progress">
-                <span className="highlight-text">{formatTimestamp(globalElapsed, totalDuration)}</span> / {formatTimestamp(totalDuration, totalDuration)}
-              </div>
-
-            </div>
           </div>
-
-          {currentClip?.type === 'file' ? (
-            <video
-              key={currentClip.id}
-              ref={previewVideoRef}
-              src={currentClip.objectUrl}
-              style={{ width: '100%', borderRadius: '8px', backgroundColor: '#000', maxHeight: '500px', display: 'block' }}
-              onLoadedMetadata={() => {
-                if (previewVideoRef.current) {
-                  previewVideoRef.current.currentTime = currentClip.trimStart;
-                  previewVideoRef.current.play();
-                }
-              }}
-              onTimeUpdate={() => {
-                if (previewVideoRef.current && previewVideoRef.current.currentTime >= currentClip.trimEnd) {
-                  advancePreview();
-                }
-              }}
-            />
-          ) : (
-            <div id="preview-yt-player" style={{ borderRadius: '8px', overflow: 'hidden' }} />
-          )}
-        </div>
-      )}
-
+          </header>
       {previewActive && currentClip?.type === 'youtube' && youtubeReady && (
         <YouTubePreviewInit
           clip={currentClip}
@@ -721,8 +669,12 @@ function StitchPage() {
             </div>
             {clips.length >= 2 && (
               <>
-                <button onClick={startPreview} className="secondary" disabled={hasOrphanedClips}>
-                  ▶ Preview All
+                <button 
+                  onClick={previewActive ? stopPreview : startPreview} 
+                  className="secondary" 
+                  disabled={hasOrphanedClips}
+                >
+                  {previewActive ? '⏹ Clear Preview' : '▶ Preview All'}
                 </button>
                 <button
                   onClick={startStitch}
@@ -734,6 +686,56 @@ function StitchPage() {
               </>
             )}
           </div>
+
+          {previewActive && (
+            <div className="preview-player-section" style={{ marginTop: '20px' }}>
+              <div className="preview-controls-enhanced">
+                <div className="preview-top-row">
+                  <span className="preview-clip-count">
+                    Clip <span className="highlight-text">{previewIndex + 1}</span> of <span className="highlight-text">{clips.length}</span>
+                  </span>
+                  <span className="preview-clip-title-truncated" title={currentClip?.title}>
+                    {currentClip?.title}
+                  </span>
+                  <button onClick={stopPreview} className="secondary mini-btn">
+                    Stop
+                  </button>
+                </div>
+                
+                <div className="preview-details-row">
+                  <div className="preview-portion-info">
+                    Selected: <span className="highlight-text">{formatTimestamp(currentClip?.trimStart || 0, currentClip?.duration)}</span> - <span className="highlight-text">{formatTimestamp(currentClip?.trimEnd || 0, currentClip?.duration)}</span>
+                    <span className="preview-duration-badge">({formatTimestamp((currentClip?.trimEnd || 0) - (currentClip?.trimStart || 0), currentClip?.duration)})</span>
+                  </div>
+                  <div className="preview-global-progress">
+                    <span className="highlight-text">{formatTimestamp(globalElapsed, totalDuration)}</span> / {formatTimestamp(totalDuration, totalDuration)}
+                  </div>
+                </div>
+              </div>
+
+              {currentClip?.type === 'file' ? (
+                <video
+                  key={currentClip.id}
+                  ref={previewVideoRef}
+                  src={currentClip.objectUrl}
+                  style={{ width: '100%', borderRadius: '8px', backgroundColor: '#000', maxHeight: '500px', display: 'block' }}
+                  onLoadedMetadata={() => {
+                    if (previewVideoRef.current) {
+                      previewVideoRef.current.currentTime = currentClip.trimStart;
+                      previewVideoRef.current.play();
+                    }
+                  }}
+                  onTimeUpdate={() => {
+                    if (previewVideoRef.current && previewVideoRef.current.currentTime >= currentClip.trimEnd) {
+                      advancePreview();
+                    }
+                  }}
+                />
+              ) : (
+                <div id="preview-yt-player" style={{ borderRadius: '8px', overflow: 'hidden' }} />
+              )}
+            </div>
+          )}
         </>
       )}
 
@@ -782,6 +784,10 @@ function StitchPage() {
           </div>
         </div>
       )}
+
+      <footer style={{ marginTop: '40px', padding: '20px 0', textAlign: 'center', borderTop: '1px solid var(--border)', color: 'var(--text-dim)', fontSize: '0.85rem' }}>
+        <p>© {new Date().getFullYear()} <strong>YouTubeTailor</strong> — Handcrafted for perfect cuts.</p>
+      </footer>
     </div>
   );
 }
