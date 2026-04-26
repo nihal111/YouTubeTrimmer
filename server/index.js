@@ -5,6 +5,7 @@ const cors = require('cors');
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+const multer = require('multer');
 
 const app = express();
 app.use(cors({
@@ -37,6 +38,25 @@ const DOWNLOADS_DIR = path.join(__dirname, '../downloads');
 if (!fs.existsSync(DOWNLOADS_DIR)) {
   fs.mkdirSync(DOWNLOADS_DIR);
 }
+
+const UPLOADS_DIR = path.join(__dirname, '../uploads');
+if (!fs.existsSync(UPLOADS_DIR)) {
+  fs.mkdirSync(UPLOADS_DIR);
+}
+
+// Multer configuration for file uploads
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, UPLOADS_DIR),
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    cb(null, `upload_${Date.now()}_${Math.random().toString(36).slice(2)}${ext}`);
+  }
+});
+
+const upload = multer({
+  storage,
+  limits: { fileSize: 2 * 1024 * 1024 * 1024, files: 20 }
+});
 
 // Serve static files from downloads directory
 app.use('/downloads', express.static(DOWNLOADS_DIR));
@@ -90,6 +110,35 @@ app.get('/api/info', async (req, res) => {
     console.error(`[API] Exception: ${err.message}`);
     res.status(500).json({ error: err.message });
   }
+});
+
+// Stitch files upload endpoint
+app.post('/api/stitch/upload', (req, res, next) => {
+  upload.array('files', 20)(req, res, (err) => {
+    if (err) {
+      return res.status(400).json({ error: `Upload error: ${err.message}` });
+    }
+    next();
+  });
+}, (req, res) => {
+  const { socketId } = req.body;
+  const targetSocket = io.sockets.sockets.get(socketId);
+
+  if (!targetSocket) {
+    req.files?.forEach(f => fs.unlink(f.path, () => {}));
+    return res.status(400).json({ error: 'Socket connection not found' });
+  }
+
+  if (!req.files || req.files.length < 2) {
+    req.files?.forEach(f => fs.unlink(f.path, () => {}));
+    return res.status(400).json({ error: 'At least 2 files are required' });
+  }
+
+  console.log(`[STITCH] Upload received from ${socketId}: ${req.files.length} files`);
+  res.json({ ok: true });
+
+  // Process asynchronously
+  setImmediate(() => runStitch(targetSocket, req.files, io));
 });
 
 io.on('connection', (socket) => {
@@ -164,6 +213,104 @@ io.on('connection', (socket) => {
     console.log('Client disconnected');
   });
 });
+
+// Stitch function - concatenates multiple video/audio files
+function runStitch(socket, uploadedFiles, ioServer) {
+  const jobId = `stitch_${Date.now()}`;
+  const concatListPath = path.join(UPLOADS_DIR, `${jobId}_list.txt`);
+  const outputFileName = `${jobId}.mp4`;
+  const outputPath = path.join(DOWNLOADS_DIR, outputFileName);
+
+  // Write ffmpeg concat list
+  const listContent = uploadedFiles
+    .map(f => `file '${f.path}'`)
+    .join('\n');
+
+  try {
+    fs.writeFileSync(concatListPath, listContent);
+  } catch (err) {
+    socket.emit('stitch:error', `Failed to write concat list: ${err.message}`);
+    cleanup(uploadedFiles, concatListPath);
+    return;
+  }
+
+  socket.emit('stitch:log', `Starting stitch of ${uploadedFiles.length} files...`);
+  socket.emit('stitch:log', `Output: ${outputFileName}`);
+
+  const doRun = (extraArgs, label) => {
+    const args = [
+      '-y',
+      '-f', 'concat',
+      '-safe', '0',
+      '-i', concatListPath,
+      ...extraArgs,
+      outputPath
+    ];
+
+    socket.emit('stitch:log', `[ffmpeg] ${label}`);
+    console.log(`[STITCH] Running: ffmpeg ${args.join(' ')}`);
+
+    const child = spawn('ffmpeg', args);
+
+    child.stderr.on('data', (data) => {
+      const msg = data.toString();
+      socket.emit('stitch:log', msg);
+    });
+
+    child.on('close', (code) => {
+      if (code === 0) {
+        // Success - cleanup and emit complete
+        uploadedFiles.forEach(f => {
+          fs.unlink(f.path, (err) => {
+            if (err) console.error(`Failed to delete upload: ${err.message}`);
+          });
+        });
+        fs.unlink(concatListPath, (err) => {
+          if (err) console.error(`Failed to delete concat list: ${err.message}`);
+        });
+
+        socket.emit('stitch:complete', {
+          url: `/downloads/${outputFileName}`,
+          fileName: outputFileName
+        });
+        console.log(`[STITCH] Completed: ${outputFileName}`);
+      } else if (label === 'stream copy') {
+        // First attempt failed - retry with re-encode
+        socket.emit('stitch:log', 'Stream copy failed; retrying with re-encode (slower)...');
+        doRun(['-c:v', 'libx264', '-c:a', 'aac', '-preset', 'fast'], 're-encode');
+      } else {
+        // Re-encode also failed
+        uploadedFiles.forEach(f => {
+          fs.unlink(f.path, (err) => {
+            if (err) console.error(`Failed to delete upload: ${err.message}`);
+          });
+        });
+        fs.unlink(concatListPath, (err) => {
+          if (err) console.error(`Failed to delete concat list: ${err.message}`);
+        });
+
+        socket.emit('stitch:error', `ffmpeg exited with code ${code}`);
+        console.error(`[STITCH] Failed with code ${code}`);
+      }
+    });
+  };
+
+  // Start with stream copy (fast, no re-encoding)
+  doRun(['-c', 'copy'], 'stream copy');
+}
+
+function cleanup(files, concatListPath) {
+  files.forEach(f => {
+    fs.unlink(f.path, (err) => {
+      if (err) console.error(`Failed to delete file: ${err.message}`);
+    });
+  });
+  if (concatListPath) {
+    fs.unlink(concatListPath, (err) => {
+      if (err) console.error(`Failed to delete concat list: ${err.message}`);
+    });
+  }
+}
 
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, '0.0.0.0', () => {

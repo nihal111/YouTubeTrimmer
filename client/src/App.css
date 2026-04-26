@@ -360,6 +360,149 @@ button.secondary:hover {
   border-bottom: 1px solid #222;
   padding: 2px 0;
 }
+/* ---- App Navigation ---- */
+.app-nav {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px 16px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+
+.nav-link {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 20px;
+  border-radius: 8px;
+  color: var(--text-dim);
+  text-decoration: none;
+  font-weight: 600;
+  font-size: 0.9rem;
+  transition: all 0.2s;
+}
+
+.nav-link:hover {
+  color: var(--text);
+  background: var(--surface-hover);
+}
+
+.nav-link.active {
+  color: var(--primary);
+  background: rgba(255, 68, 68, 0.12);
+}
+
+/* ---- Stitch Page Styles ---- */
+.stitch-dropzone {
+  border: 2px dashed var(--border);
+  border-radius: 12px;
+  padding: 48px 24px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.2s;
+  background: var(--surface);
+  margin-bottom: 20px;
+}
+
+.stitch-dropzone:hover {
+  border-color: var(--accent);
+}
+
+.stitch-dropzone p {
+  color: var(--text-dim);
+  margin: 0 0 12px 0;
+  font-size: 0.95rem;
+}
+
+.stitch-dropzone svg {
+  color: var(--accent);
+  margin-bottom: 12px;
+}
+
+.stitch-dropzone input {
+  display: none;
+}
+
+.stitch-file-list {
+  background: var(--surface);
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  overflow: hidden;
+  margin-bottom: 16px;
+}
+
+.stitch-file-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.9rem;
+}
+
+.stitch-file-item:last-child {
+  border-bottom: none;
+}
+
+.stitch-file-index {
+  color: var(--text-dim);
+  font-weight: 700;
+  min-width: 24px;
+  font-size: 0.85rem;
+}
+
+.stitch-file-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.stitch-file-remove {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.stitch-file-remove:hover {
+  border-color: #ff6b6b;
+  color: #ff6b6b;
+}
+
+.stitch-add-btn {
+  background: var(--surface);
+  border: 2px dashed var(--border);
+  color: var(--accent);
+  width: 100%;
+  padding: 16px;
+  border-radius: 8px;
+  font-size: 1.5rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  margin-bottom: 16px;
+}
+
+.stitch-add-btn:hover {
+  border-color: var(--accent);
+  background: var(--surface-hover);
+  color: var(--accent);
+}
+
+.stitch-hidden-input {
+  display: none;
+}
+
 @media (max-width: 600px) {
   .container {
     padding: 8px;
@@ -399,5 +542,13 @@ button.secondary:hover {
 
   .timeline-label.end {
     bottom: -50px;
+  }
+
+  .stitch-dropzone {
+    padding: 32px 16px;
+  }
+
+  .stitch-dropzone p {
+    font-size: 0.85rem;
   }
 }

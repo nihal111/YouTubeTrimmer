@@ -1,0 +1,44 @@
+[1] 
+[1] > youtube-trimmer@1.0.0 start:client
+[1] > cd client && npm run dev
+[1] 
+[0] 
+[0] > youtube-trimmer@1.0.0 start:server
+[0] > cd server && npm start
+[0] 
+[1] 
+[1] > client@0.0.0 dev
+[1] > vite
+[1] 
+[0] 
+[0] > youtube-trimmer-server@1.0.0 start
+[0] > node index.js
+[0] 
+[0] node:events:487
+[0]       throw er; // Unhandled 'error' event
+[0]       ^
+[0] 
+[0] Error: listen EADDRINUSE: address already in use 0.0.0.0:3001
+[0]     at Server.setupListenHandle [as _listen2] (node:net:2008:16)
+[0]     at listenInCluster (node:net:2065:12)
+[0]     at node:net:2274:7
+[0]     at process.processTicksAndRejections (node:internal/process/task_queues:90:21)
+[0] Emitted 'error' event on Server instance at:
+[0]     at emitErrorNT (node:net:2044:8)
+[0]     at process.processTicksAndRejections (node:internal/process/task_queues:90:21) {
+[0]   code: 'EADDRINUSE',
+[0]   errno: -48,
+[0]   syscall: 'listen',
+[0]   address: '0.0.0.0',
+[0]   port: 3001
+[0] }
+[0] 
+[0] Node.js v25.9.0
+[1] Port 5173 is in use, trying another one...
+[0] npm run start:server exited with code 1
+[1] 
+[1]   VITE v8.0.10  ready in 110 ms
+[1] 
+[1]   ➜  Local:   http://localhost:5174/
+[1]   ➜  Network: http://10.0.0.56:5174/
+[1]   ➜  Network: http://100.89.5.62:5174/
