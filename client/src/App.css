@@ -643,6 +643,19 @@ button.secondary:hover {
   padding: 16px;
   border: 2px solid var(--accent);
   margin-bottom: 20px;
+  width: 100%;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+#preview-yt-player {
+  width: 100% !important;
+  max-width: 100% !important;
+}
+
+#preview-yt-player iframe {
+  width: 100% !important;
+  max-width: 100% !important;
 }
 
 .preview-controls {

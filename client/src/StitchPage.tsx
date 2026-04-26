@@ -50,6 +50,53 @@ declare global {
   }
 }
 
+// Module-level cache for File objects (survives component mount/unmount)
+const fileClipCache = new Map<string, File>();
+
+// Persistence utilities
+const CLIPS_STORAGE_KEY = 'stitcher_clips';
+
+const persistClips = (clips: ClipItem[]) => {
+  const serialized = clips.map((c) => ({
+    id: c.id,
+    type: c.type,
+    youtubeUrl: c.youtubeUrl,
+    videoId: c.videoId,
+    title: c.title,
+    duration: c.duration,
+    trimStart: c.trimStart,
+    trimEnd: c.trimEnd,
+    uploadedPath: c.uploadedPath
+  }));
+  localStorage.setItem(CLIPS_STORAGE_KEY, JSON.stringify(serialized));
+};
+
+const loadClips = (setClips: React.Dispatch<React.SetStateAction<ClipItem[]>>) => {
+  try {
+    const stored = localStorage.getItem(CLIPS_STORAGE_KEY);
+    if (!stored) return;
+
+    const clips = JSON.parse(stored) as ClipItem[];
+    const restoredClips = clips.map((c) => {
+      if (c.type === 'file') {
+        const file = fileClipCache.get(c.id);
+        const objectUrl = file ? URL.createObjectURL(file) : undefined;
+        return { ...c, file, objectUrl };
+      }
+      return c;
+    });
+
+    setClips(restoredClips);
+  } catch (err) {
+    console.error('Failed to load clips from storage:', err);
+  }
+};
+
+const clearClips = () => {
+  localStorage.removeItem(CLIPS_STORAGE_KEY);
+  fileClipCache.clear();
+};
+
 function StitchPage() {
   const [clips, setClips] = useState<ClipItem[]>([]);
   const [ytInput, setYtInput] = useState('');
@@ -72,6 +119,11 @@ function StitchPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const totalDuration = clips.reduce((sum, c) => sum + Math.max(0, c.trimEnd - c.trimStart), 0);
+
+  // Load clips from localStorage on mount
+  useEffect(() => {
+    loadClips(setClips);
+  }, []);
 
   // Load YouTube IFrame API
   useEffect(() => {
@@ -135,6 +187,7 @@ function StitchPage() {
   const addFileClip = (file: File) => {
     const objectUrl = URL.createObjectURL(file);
     const id = `${Date.now()}_${Math.random()}`;
+    fileClipCache.set(id, file);
 
     const video = document.createElement('video');
     video.src = objectUrl;
@@ -150,8 +203,11 @@ function StitchPage() {
         trimStart: 0,
         trimEnd: duration
       };
-      setClips((prev) => [...prev, newClip]);
-      URL.revokeObjectURL(objectUrl);
+      setClips((prev) => {
+        const updated = [...prev, newClip];
+        persistClips(updated);
+        return updated;
+      });
     };
   };
 
@@ -184,7 +240,9 @@ function StitchPage() {
         trimStart: 0,
         trimEnd: data.duration
       };
-      setClips((prev) => [...prev, newClip]);
+      const updated = [...clips, newClip];
+      setClips(updated);
+      persistClips(updated);
       setYtInput('');
     } catch (err: any) {
       alert(`Error adding YouTube clip: ${err.message}`);
@@ -202,11 +260,14 @@ function StitchPage() {
       ytPlayerRefs.current[id].destroy();
       delete ytPlayerRefs.current[id];
     }
-    setClips((prev) => prev.filter(c => c.id !== id));
+    fileClipCache.delete(id);
+    const updated = clips.filter(c => c.id !== id);
+    setClips(updated);
+    persistClips(updated);
   };
 
   const updateTrim = (id: string, field: 'trimStart' | 'trimEnd', value: number) => {
-    setClips((prev) => prev.map((c) => {
+    const updated = clips.map((c) => {
       if (c.id !== id) return c;
       const clamped = Math.max(0, Math.min(c.duration, value));
       if (field === 'trimStart') {
@@ -214,7 +275,9 @@ function StitchPage() {
       } else {
         return { ...c, trimEnd: Math.max(clamped, c.trimStart + 0.1) };
       }
-    }));
+    });
+    setClips(updated);
+    persistClips(updated);
   };
 
   const startPreview = () => {
