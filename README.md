@@ -77,6 +77,9 @@ npm run install:all
 
 # Start both server (port 3001) and client dev server (port 5173)
 npm run dev
+
+# Restart both server and client after code changes or when either listener gets stale
+npm run restart:dev
 ```
 
 Then open `http://localhost:5173`.
@@ -106,3 +109,5 @@ YouTubeTailor/
 - File clips uploaded for stitching are deleted from `uploads/` automatically after the stitch job completes (or fails).
 - The stitch output is always re-encoded to 1920×1080 h264. Source 4K clips are downscaled; source clips narrower than 16:9 get black letterbox bars.
 - The preview player in Stitch mode works entirely in-browser (no encoding) — it plays each clip using the YouTube IFrame API or an HTML5 `<video>` element and advances automatically at each clip's trim end point.
+- After frontend, backend, or shared code changes, restart the dev session before testing so both `3001` and `5173` match the current code.
+- Use `npm run restart:dev` when you want a one-command full-stack refresh.

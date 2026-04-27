@@ -17,6 +17,21 @@ interface ClipItem {
   trimEnd: number;
 }
 
+interface PreviewSegment {
+  clip: ClipItem;
+  clipIndex: number;
+  color: string;
+  duration: number;
+  globalStart: number;
+  globalEnd: number;
+}
+
+interface PendingPreviewSeek {
+  clipIndex: number;
+  sourceTime: number;
+  autoPlay: boolean;
+}
+
 const secondsToHMS = (secs: number) => {
   const h = Math.floor(secs / 3600);
   const m = Math.floor((secs % 3600) / 60);
@@ -88,6 +103,20 @@ declare global {
 const fileClipCache = new Map<string, File>();
 const CLIPS_STORAGE_KEY = 'stitcher_clips';
 const ACTIVE_JOB_KEY = 'stitcher_active_job';
+const PREVIEW_COLORS = [
+  '#60a5fa',
+  '#34d399',
+  '#fbbf24',
+  '#f87171',
+  '#22d3ee',
+  '#f472b6',
+  '#a78bfa',
+  '#84cc16',
+  '#fb923c',
+  '#2dd4bf',
+  '#e879f9',
+  '#38bdf8'
+];
 
 const persistClips = (clips: ClipItem[]) => {
   const serialized = clips.map((c) => ({
@@ -129,12 +158,12 @@ function StitchPage() {
   const [clips, setClips] = useState<ClipItem[]>([]);
   const [ytInput, setYtInput] = useState('');
   const [ytLoading, setYtLoading] = useState(false);
-  const [previewActive, setPreviewActive] = useState(false);
+  const [previewLoaded, setPreviewLoaded] = useState(false);
+  const [previewPlaying, setPreviewPlaying] = useState(false);
   const [previewIndex, setPreviewIndex] = useState(0);
   const [logs, setLogs] = useState<string[]>([]);
   const [progress, setProgress] = useState({ percent: 0, etc: '' });
   const [isStitching, setIsStitching] = useState(false);
-  const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [stitchResult, setStitchResult] = useState<{ url: string; fileName: string } | null>(null);
   const [socket, setSocket] = useState<Socket | null>(null);
   const [youtubeReady, setYoutubeReady] = useState(false);
@@ -144,12 +173,35 @@ function StitchPage() {
   const previewVideoRef = useRef<HTMLVideoElement | null>(null);
   const previewYtPlayerRef = useRef<any>(null);
   const previewIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pendingPreviewSeekRef = useRef<PendingPreviewSeek | null>(null);
+  const previewTimelineTrackRef = useRef<HTMLDivElement | null>(null);
+  const previewDragStateRef = useRef<{ active: boolean; pointerId: number | null; previewTime: number }>({
+    active: false,
+    pointerId: null,
+    previewTime: 0
+  });
   const clipsRef = useRef<ClipItem[]>([]);
   const logContainerRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const projectInputRef = useRef<HTMLInputElement>(null);
 
-  const totalDuration = clips.reduce((sum, c) => sum + Math.max(0, c.trimEnd - c.trimStart), 0);
+  const previewSegments: PreviewSegment[] = clips.reduce<PreviewSegment[]>((segments, clip, clipIndex) => {
+    const duration = Math.max(0, clip.trimEnd - clip.trimStart);
+    const globalStart = segments.length > 0 ? segments[segments.length - 1].globalEnd : 0;
+    const globalEnd = globalStart + duration;
+
+    segments.push({
+      clip,
+      clipIndex,
+      color: PREVIEW_COLORS[clipIndex % PREVIEW_COLORS.length],
+      duration,
+      globalStart,
+      globalEnd
+    });
+
+    return segments;
+  }, []);
+  const totalDuration = previewSegments.reduce((sum, segment) => sum + segment.duration, 0);
 
   useEffect(() => {
     loadClipsFromStorage(setClips);
@@ -184,7 +236,6 @@ function StitchPage() {
     });
 
     newSocket.on('stitch:attached', (data) => {
-      setActiveJobId(data.jobId);
       setIsStitching(!data.result && !data.error);
       if (data.progress) setProgress(data.progress);
       if (data.logs) setLogs(data.logs);
@@ -253,6 +304,9 @@ function StitchPage() {
         persistClips(updated);
         return updated;
       });
+      if (previewLoaded) {
+        clearPreview();
+      }
     };
   };
 
@@ -266,6 +320,9 @@ function StitchPage() {
       persistClips(updated);
       return updated;
     });
+    if (previewLoaded) {
+      clearPreview();
+    }
   };
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -303,6 +360,9 @@ function StitchPage() {
         return updated;
       });
       setYtInput('');
+      if (previewLoaded) {
+        clearPreview();
+      }
     } catch (err: any) {
       alert(`Error adding YouTube clip: ${err.message}`);
     } finally {
@@ -323,6 +383,9 @@ function StitchPage() {
       persistClips(updated);
       return updated;
     });
+    if (previewLoaded) {
+      clearPreview();
+    }
   };
 
   const resetProject = () => {
@@ -338,7 +401,7 @@ function StitchPage() {
       fileClipCache.clear();
       setClips([]);
       localStorage.removeItem(CLIPS_STORAGE_KEY);
-      stopPreview();
+      clearPreview();
     }
   };
 
@@ -353,6 +416,9 @@ function StitchPage() {
       persistClips(next);
       return next;
     });
+    if (previewLoaded) {
+      clearPreview();
+    }
   };
 
   const updateTrim = (id: string, field: 'trimStart' | 'trimEnd', value: number) => {
@@ -369,28 +435,38 @@ function StitchPage() {
       persistClips(updated);
       return updated;
     });
+    if (previewLoaded) {
+      clearPreview();
+    }
   };
 
   const startPreview = () => {
     setLogs([]);
     setProgress({ percent: 0, etc: '' });
     setIsStitching(false);
-    setPreviewActive(true);
+    setStitchResult(null);
+    setPreviewLoaded(true);
+    setPreviewPlaying(true);
     setPreviewIndex(0);
+    setScrubElapsed(0);
+    setIsDraggingPreview(false);
+    pendingPreviewSeekRef.current = null;
   };
 
   const advancePreview = () => {
     const current = clipsRef.current;
-    setPreviewIndex((i) => {
-      if (i + 1 < current.length) return i + 1;
-      stopPreview();
-      return i;
-    });
+    if (previewIndex + 1 < current.length) {
+      setPreviewIndex(previewIndex + 1);
+    } else {
+      clearPreview();
+    }
   };
 
-  const stopPreview = () => {
-    setPreviewActive(false);
+  const clearPreview = () => {
+    setPreviewLoaded(false);
+    setPreviewPlaying(false);
     setPreviewIndex(0);
+    pendingPreviewSeekRef.current = null;
     if (previewIntervalRef.current) {
       clearInterval(previewIntervalRef.current);
       previewIntervalRef.current = null;
@@ -399,8 +475,68 @@ function StitchPage() {
       previewVideoRef.current.pause();
     }
     if (previewYtPlayerRef.current) {
-      previewYtPlayerRef.current.destroy();
+      try {
+        previewYtPlayerRef.current.destroy();
+      } catch {}
       previewYtPlayerRef.current = null;
+    }
+  };
+
+  const getSegmentForGlobalTime = (globalTime: number) => {
+    if (previewSegments.length === 0) return null;
+    const clamped = Math.max(0, Math.min(totalDuration, globalTime));
+    if (clamped >= totalDuration) {
+      return previewSegments[previewSegments.length - 1];
+    }
+    return previewSegments.find((segment) => clamped >= segment.globalStart && clamped < segment.globalEnd) || null;
+  };
+
+  const seekPreview = (globalTime: number) => {
+    const segment = getSegmentForGlobalTime(globalTime);
+    if (!segment) return;
+
+    const clamped = Math.max(0, Math.min(totalDuration, globalTime));
+    const sourceTime = Math.max(segment.clip.trimStart, Math.min(segment.clip.trimEnd, segment.clip.trimStart + (clamped - segment.globalStart)));
+    pendingPreviewSeekRef.current = {
+      clipIndex: segment.clipIndex,
+      sourceTime,
+      autoPlay: true
+    };
+    setPreviewIndex(segment.clipIndex);
+    setPreviewLoaded(true);
+    setPreviewPlaying(true);
+    setScrubElapsed(clamped);
+    if (segment.clipIndex === previewIndex) {
+      syncPreviewPlayback(sourceTime);
+    }
+  };
+
+  const syncPreviewPlayback = (sourceTime?: number) => {
+    const clip = clipsRef.current[previewIndex];
+    if (!clip) return;
+
+    const pending = pendingPreviewSeekRef.current;
+    const targetTime = pending?.clipIndex === previewIndex ? pending.sourceTime : (sourceTime ?? clip.trimStart);
+    const shouldPlay = pending?.clipIndex === previewIndex ? pending.autoPlay : previewPlaying;
+
+    if (clip.type === 'file' && previewVideoRef.current) {
+      if (Number.isFinite(targetTime)) {
+        previewVideoRef.current.currentTime = targetTime;
+      }
+      if (shouldPlay) {
+        previewVideoRef.current.play().catch(() => {});
+      }
+    }
+
+    if (clip.type === 'youtube' && previewYtPlayerRef.current?.seekTo) {
+      previewYtPlayerRef.current.seekTo(targetTime, true);
+      if (shouldPlay && previewYtPlayerRef.current.playVideo) {
+        previewYtPlayerRef.current.playVideo();
+      }
+    }
+
+    if (pending?.clipIndex === previewIndex) {
+      pendingPreviewSeekRef.current = null;
     }
   };
 
@@ -482,6 +618,9 @@ function StitchPage() {
 
       setClips(restoredClips);
       persistClips(restoredClips);
+      if (previewLoaded) {
+        clearPreview();
+      }
       alert(`Loaded ${restoredClips.length} clips`);
     } catch (err: any) {
       alert(`Failed to load project: ${err.message}`);
@@ -540,7 +679,6 @@ function StitchPage() {
         setLogs((prev) => [...prev, `Error: ${data.error}`]);
         setIsStitching(false);
       } else {
-        setActiveJobId(data.jobId);
         localStorage.setItem(ACTIVE_JOB_KEY, data.jobId);
       }
     } catch (err: any) {
@@ -551,45 +689,99 @@ function StitchPage() {
 
   const currentClip = clips[previewIndex];
   const [globalElapsed, setGlobalElapsed] = useState(0);
+  const [scrubElapsed, setScrubElapsed] = useState(0);
+  const [isDraggingPreview, setIsDraggingPreview] = useState(false);
 
   useEffect(() => {
-    if (!previewActive) {
+    if (!previewLoaded) {
       setGlobalElapsed(0);
+      setScrubElapsed(0);
+      setIsDraggingPreview(false);
       return;
     }
 
     const interval = setInterval(() => {
-      let elapsed = 0;
-      for (let i = 0; i < previewIndex; i++) {
-        elapsed += (clips[i].trimEnd - clips[i].trimStart);
-      }
-      if (currentClip) {
-        if (currentClip.type === 'file' && previewVideoRef.current) {
-          elapsed += Math.max(0, previewVideoRef.current.currentTime - currentClip.trimStart);
-        } else if (currentClip.type === 'youtube' && previewYtPlayerRef.current && previewYtPlayerRef.current.getCurrentTime) {
-          elapsed += Math.max(0, previewYtPlayerRef.current.getCurrentTime() - currentClip.trimStart);
+      const currentSegment = previewSegments[previewIndex];
+      let elapsed = currentSegment ? currentSegment.globalStart : 0;
+      if (currentSegment) {
+        if (currentSegment.clip.type === 'file' && previewVideoRef.current) {
+          elapsed += Math.max(0, previewVideoRef.current.currentTime - currentSegment.clip.trimStart);
+        } else if (currentSegment.clip.type === 'youtube' && previewYtPlayerRef.current && previewYtPlayerRef.current.getCurrentTime) {
+          elapsed += Math.max(0, previewYtPlayerRef.current.getCurrentTime() - currentSegment.clip.trimStart);
         }
       }
-      setGlobalElapsed(elapsed);
+      setGlobalElapsed(Math.max(0, Math.min(totalDuration, elapsed)));
     }, 250);
 
     return () => clearInterval(interval);
-  }, [previewActive, previewIndex, clips, currentClip]);
+  }, [previewLoaded, previewIndex, previewSegments, totalDuration]);
+
+  const getTimeFromClientX = (clientX: number) => {
+    const track = previewTimelineTrackRef.current;
+    if (!track || totalDuration <= 0) return 0;
+    const rect = track.getBoundingClientRect();
+    const raw = ((clientX - rect.left) / rect.width) * totalDuration;
+    return Math.max(0, Math.min(totalDuration, raw));
+  };
+
+  const beginPreviewDrag = (e: React.PointerEvent<HTMLButtonElement>) => {
+    if (totalDuration <= 0 || e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    previewDragStateRef.current = {
+      active: true,
+      pointerId: e.pointerId,
+      previewTime: isDraggingPreview ? scrubElapsed : globalElapsed
+    };
+    setIsDraggingPreview(true);
+    setScrubElapsed(previewDragStateRef.current.previewTime);
+    setPreviewPlaying(false);
+    if (previewVideoRef.current) {
+      previewVideoRef.current.pause();
+    }
+    if (previewYtPlayerRef.current?.pauseVideo) {
+      previewYtPlayerRef.current.pauseVideo();
+    }
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
+
+  const updatePreviewDrag = (e: React.PointerEvent<HTMLButtonElement>) => {
+    if (!previewDragStateRef.current.active) return;
+    e.preventDefault();
+    const nextTime = getTimeFromClientX(e.clientX);
+    previewDragStateRef.current.previewTime = nextTime;
+    setScrubElapsed(nextTime);
+  };
+
+  const finishPreviewDrag = (e: React.PointerEvent<HTMLButtonElement>) => {
+    if (!previewDragStateRef.current.active) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const nextTime = previewDragStateRef.current.previewTime;
+    previewDragStateRef.current.active = false;
+    previewDragStateRef.current.pointerId = null;
+    setIsDraggingPreview(false);
+    seekPreview(nextTime);
+    try {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    } catch {}
+  };
 
   const hasOrphanedClips = clips.some((c) => c.type === 'file' && !c.objectUrl);
+  const displayedPreviewTime = isDraggingPreview ? scrubElapsed : globalElapsed;
 
   return (
     <div className="container">
-      <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <h1><Film /> YouTubeTailor <span style={{ fontSize: '0.6em', opacity: 0.7, fontWeight: 400, marginLeft: '8px', verticalAlign: 'middle' }}>Stitcher</span></h1>
-        <div style={{ display: 'flex', gap: '8px' }}>
-          <button onClick={resetProject} className="secondary" title="Reset everything and start over" style={{ color: '#ff6b6b' }}>
+      <header className="stitch-header">
+        <h1><Film /> YouTubeTailor</h1>
+        <div className="stitch-header-actions">
+          <button onClick={resetProject} className="secondary stitch-header-btn" title="Reset everything and start over" style={{ color: '#ff6b6b' }}>
             🗑 Reset
           </button>
-          <button onClick={saveProject} className="secondary" title="Download project as JSON">
+          <button onClick={saveProject} className="secondary stitch-header-btn" title="Download project as JSON">
             💾 Save Project
           </button>
-          <button onClick={() => projectInputRef.current?.click()} className="secondary" title="Load project from JSON">
+          <button onClick={() => projectInputRef.current?.click()} className="secondary stitch-header-btn" title="Load project from JSON">
             📂 Load Project
           </button>
           <input
@@ -600,13 +792,16 @@ function StitchPage() {
             style={{ display: 'none' }}
           />
           </div>
-          </header>
-      {previewActive && currentClip?.type === 'youtube' && youtubeReady && (
+      </header>
+      {previewLoaded && currentClip?.type === 'youtube' && youtubeReady && (
         <YouTubePreviewInit
           clip={currentClip}
           onRef={(player) => { previewYtPlayerRef.current = player; }}
           onAdvance={advancePreview}
           previewIntervalRef={previewIntervalRef}
+          pendingPreviewSeekRef={pendingPreviewSeekRef}
+          previewIndex={previewIndex}
+          previewPlaying={previewPlaying}
         />
       )}
 
@@ -670,11 +865,11 @@ function StitchPage() {
             {clips.length >= 2 && (
               <>
                 <button 
-                  onClick={previewActive ? stopPreview : startPreview} 
+                  onClick={previewLoaded ? clearPreview : startPreview} 
                   className="secondary" 
                   disabled={hasOrphanedClips}
                 >
-                  {previewActive ? '⏹ Clear Preview' : '▶ Preview All'}
+                  {previewLoaded ? '⏹ Clear Preview' : '▶ Preview All'}
                 </button>
                 <button
                   onClick={startStitch}
@@ -687,7 +882,7 @@ function StitchPage() {
             )}
           </div>
 
-          {previewActive && (
+          {previewLoaded && (
             <div className="preview-player-section" style={{ marginTop: '20px' }}>
               <div className="preview-controls-enhanced">
                 <div className="preview-top-row">
@@ -697,7 +892,7 @@ function StitchPage() {
                   <span className="preview-clip-title-truncated" title={currentClip?.title}>
                     {currentClip?.title}
                   </span>
-                  <button onClick={stopPreview} className="secondary mini-btn">
+                  <button onClick={clearPreview} className="secondary mini-btn">
                     Stop
                   </button>
                 </div>
@@ -711,6 +906,72 @@ function StitchPage() {
                     <span className="highlight-text">{formatTimestamp(globalElapsed, totalDuration)}</span> / {formatTimestamp(totalDuration, totalDuration)}
                   </div>
                 </div>
+                <div
+                  className="preview-timeline"
+                  role="slider"
+                  aria-label="Preview timeline"
+                  aria-valuemin={0}
+                  aria-valuemax={Math.max(0, totalDuration)}
+                  aria-valuenow={displayedPreviewTime}
+                  tabIndex={0}
+                  onClick={(e) => {
+                    const target = e.currentTarget as HTMLElement;
+                    const rect = target.getBoundingClientRect();
+                    const nextTime = ((e.clientX - rect.left) / rect.width) * totalDuration;
+                    seekPreview(nextTime);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Home') {
+                      e.preventDefault();
+                      seekPreview(0);
+                    }
+                    if (e.key === 'End') {
+                      e.preventDefault();
+                      seekPreview(totalDuration);
+                    }
+                  }}
+                >
+                  <div className="preview-timeline-track" ref={previewTimelineTrackRef}>
+                    {previewSegments.map((segment, index) => (
+                      <button
+                        key={segment.clip.id}
+                        type="button"
+                        className={`preview-timeline-segment${index === 0 ? ' is-first' : ''}${index === previewSegments.length - 1 ? ' is-last' : ''}`}
+                        title={`${segment.clip.title} • ${formatTimestamp(segment.clip.trimStart, segment.clip.duration)} - ${formatTimestamp(segment.clip.trimEnd, segment.clip.duration)}`}
+                        style={{
+                          flexGrow: segment.duration || 1,
+                          backgroundColor: segment.color,
+                          opacity: previewIndex === segment.clipIndex ? 1 : 0.78
+                        }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          seekPreview(segment.globalStart);
+                        }}
+                      >
+                        <span className="preview-timeline-segment-label">
+                          {segment.clipIndex + 1}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                  <button
+                    type="button"
+                    className="preview-timeline-playhead"
+                    aria-label="Drag to seek preview"
+                    style={{
+                      left: totalDuration > 0 ? `${(displayedPreviewTime / totalDuration) * 100}%` : '0%'
+                    }}
+                    onPointerDown={beginPreviewDrag}
+                    onPointerMove={updatePreviewDrag}
+                    onPointerUp={finishPreviewDrag}
+                    onPointerCancel={finishPreviewDrag}
+                  />
+                </div>
+                <div className="preview-timeline-labels">
+                  <span>0:00</span>
+                  <span className="preview-timeline-current">{formatTimestamp(displayedPreviewTime, totalDuration)}</span>
+                  <span>{formatTimestamp(totalDuration, totalDuration)}</span>
+                </div>
               </div>
 
               {currentClip?.type === 'file' ? (
@@ -721,8 +982,7 @@ function StitchPage() {
                   style={{ width: '100%', borderRadius: '8px', backgroundColor: '#000', maxHeight: '500px', display: 'block' }}
                   onLoadedMetadata={() => {
                     if (previewVideoRef.current) {
-                      previewVideoRef.current.currentTime = currentClip.trimStart;
-                      previewVideoRef.current.play();
+                      syncPreviewPlayback();
                     }
                   }}
                   onTimeUpdate={() => {
@@ -730,6 +990,8 @@ function StitchPage() {
                       advancePreview();
                     }
                   }}
+                  onPlay={() => setPreviewPlaying(true)}
+                  onPause={() => setPreviewPlaying(false)}
                 />
               ) : (
                 <div id="preview-yt-player" style={{ borderRadius: '8px', overflow: 'hidden' }} />
@@ -1009,11 +1271,18 @@ interface YouTubePreviewInitProps {
   onRef: (player: any) => void;
   onAdvance: () => void;
   previewIntervalRef: React.MutableRefObject<ReturnType<typeof setInterval> | null>;
+  pendingPreviewSeekRef: React.MutableRefObject<PendingPreviewSeek | null>;
+  previewIndex: number;
+  previewPlaying: boolean;
 }
 
-function YouTubePreviewInit({ clip, onRef, onAdvance, previewIntervalRef }: YouTubePreviewInitProps) {
+function YouTubePreviewInit({ clip, onRef, onAdvance, previewIntervalRef, pendingPreviewSeekRef, previewIndex, previewPlaying }: YouTubePreviewInitProps) {
   const onAdvanceRef = useRef(onAdvance);
   onAdvanceRef.current = onAdvance;
+  const previewIndexRef = useRef(previewIndex);
+  previewIndexRef.current = previewIndex;
+  const previewPlayingRef = useRef(previewPlaying);
+  previewPlayingRef.current = previewPlaying;
 
   useEffect(() => {
     if (!window.YT) return;
@@ -1030,8 +1299,15 @@ function YouTubePreviewInit({ clip, onRef, onAdvance, previewIntervalRef }: YouT
       },
       events: {
         onReady: (event: any) => {
-          event.target.seekTo(clip.trimStart);
-          event.target.playVideo();
+          const pending = pendingPreviewSeekRef.current;
+          const targetTime = pending?.clipIndex === previewIndexRef.current ? pending.sourceTime : clip.trimStart;
+          event.target.seekTo(targetTime, true);
+          if (pending?.clipIndex === previewIndexRef.current ? pending.autoPlay : previewPlayingRef.current) {
+            event.target.playVideo();
+          }
+          if (pending?.clipIndex === previewIndexRef.current) {
+            pendingPreviewSeekRef.current = null;
+          }
         },
         onStateChange: (event: any) => {
           if (event.data === window.YT.PlayerState.PLAYING) {
