@@ -691,6 +691,7 @@ button.secondary:hover {
   flex-wrap: wrap;
   background: var(--surface-hover);
   border-top: 1px solid var(--border);
+  margin-bottom: 16px;
 }
 
 .transition-control-label {
@@ -713,8 +714,10 @@ button.secondary:hover {
   width: 160px;
   min-width: 110px;
   max-width: 160px;
-  padding: 6px 10px;
-  font-size: 0.85rem;
+  height: 40px;
+  box-sizing: border-box;
+  padding: 0 10px;
+  font-size: 0.9rem;
   line-height: 1.2;
 }
 
@@ -734,11 +737,30 @@ button.secondary:hover {
 
 .transition-control-duration input {
   width: 68px;
+  height: 40px;
+  box-sizing: border-box;
+  padding: 0 10px;
+  font-size: 0.9rem;
 }
 
-.transition-preview-btn {
+.transition-control-duration span {
+  font-size: 0.9rem;
+  color: var(--text-dim);
+}
+
+button.transition-preview-btn {
   white-space: nowrap;
-  flex: 0 0 auto;
+  flex: 1 1 100%;
+  width: 100%;
+  margin-top: 4px;
+  padding: 10px 14px;
+  background: linear-gradient(90deg, rgba(62, 166, 255, 0.18), rgba(62, 166, 255, 0.28));
+  border: 1px solid rgba(62, 166, 255, 0.45);
+  color: #dff2ff;
+}
+
+button.transition-preview-btn:hover:not(:disabled) {
+  background: linear-gradient(90deg, rgba(62, 166, 255, 0.24), rgba(62, 166, 255, 0.36));
 }
 
 .transition-preview-panel {
@@ -1197,7 +1219,7 @@ button.secondary:hover {
   }
 
   .transition-preview-btn {
-    align-self: flex-start;
+    align-self: stretch;
   }
 
   .total-duration-label {
