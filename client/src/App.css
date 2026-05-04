@@ -688,7 +688,7 @@ button.secondary:hover {
   padding: 8px 16px;
   align-items: center;
   justify-content: flex-start;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   background: var(--surface-hover);
   border-top: 1px solid var(--border);
 }
@@ -697,18 +697,32 @@ button.secondary:hover {
   font-size: 0.85rem;
   color: var(--text-dim);
   white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+.transition-control-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 0;
+  min-width: 0;
 }
 
 .transition-control-select {
-  flex: 1 1 220px;
-  min-width: 0;
-  max-width: none;
+  flex: 0 1 160px;
+  width: 160px;
+  min-width: 110px;
+  max-width: 160px;
+  padding: 6px 10px;
+  font-size: 0.85rem;
+  line-height: 1.2;
 }
 
 .transition-control-duration-wrap {
   display: flex;
   align-items: center;
-  min-width: 0;
+  min-width: fit-content;
+  flex: 0 0 auto;
 }
 
 .transition-control-duration {
@@ -724,6 +738,7 @@ button.secondary:hover {
 
 .transition-preview-btn {
   white-space: nowrap;
+  flex: 0 0 auto;
 }
 
 .transition-preview-panel {
@@ -1158,21 +1173,31 @@ button.secondary:hover {
   }
 
   .transition-control-row {
-  flex-direction: column;
-  align-items: stretch;
+    align-items: stretch;
+    gap: 6px;
   }
 
-  .transition-control-row {
-    flex-wrap: wrap;
+  .transition-control-label {
+    flex-basis: 100%;
+  }
+
+  .transition-control-main {
+    flex: 1 1 100%;
+    min-width: 0;
   }
 
   .transition-control-select {
+    flex: 1 1 auto;
+    width: auto;
     max-width: none;
-    width: 100%;
   }
 
   .transition-control-duration {
     justify-content: flex-start;
+  }
+
+  .transition-preview-btn {
+    align-self: flex-start;
   }
 
   .total-duration-label {

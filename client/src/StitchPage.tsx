@@ -1645,31 +1645,33 @@ function TransitionControl({ transition, onChange, onPreview, isPreviewing, inde
   return (
     <div className="transition-control-row">
       <span className="transition-control-label">Transition {index + 1}→{index + 2}:</span>
-      <select
-        value={transition.type}
-        onChange={(e) => onChange({ ...transition, type: e.target.value as any })}
-        className="transition-control-select"
-      >
-        <option value="none">None (hard cut)</option>
-        <option value="fade">Fade to Silence</option>
-        <option value="crossfade">Crossfade</option>
-      </select>
-      <div className="transition-control-duration-wrap">
-        {transition.type !== 'none' && (
-          <div className="transition-control-duration">
-            <input
-              type="text"
-              inputMode="decimal"
-              value={durationDisplay}
-              onChange={handleDurationChange}
-              onFocus={() => setIsFocused(true)}
-              onBlur={handleDurationBlur}
-              title="Duration in seconds (0.2-3.0)"
-              placeholder="0.5"
-            />
-            <span>s</span>
-          </div>
-        )}
+      <div className="transition-control-main">
+        <select
+          value={transition.type}
+          onChange={(e) => onChange({ ...transition, type: e.target.value as any })}
+          className="transition-control-select"
+        >
+          <option value="none">None (hard cut)</option>
+          <option value="fade">Fade to Silence</option>
+          <option value="crossfade">Crossfade</option>
+        </select>
+        <div className="transition-control-duration-wrap">
+          {transition.type !== 'none' && (
+            <div className="transition-control-duration">
+              <input
+                type="text"
+                inputMode="decimal"
+                value={durationDisplay}
+                onChange={handleDurationChange}
+                onFocus={() => setIsFocused(true)}
+                onBlur={handleDurationBlur}
+                title="Duration in seconds (0.2-3.0)"
+                placeholder="0.5"
+              />
+              <span>s</span>
+            </div>
+          )}
+        </div>
       </div>
       {transition.type !== 'none' && (
         <button

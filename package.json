@@ -7,7 +7,8 @@
     "restart:server": "node -e \"const { spawnSync } = require('child_process'); const res = spawnSync('lsof', ['-tiTCP:3001', '-sTCP:LISTEN'], { encoding: 'utf8' }); if (res.status === 0 && res.stdout.trim()) { for (const pid of res.stdout.trim().split(/\\s+/)) { try { process.kill(Number(pid), 'SIGTERM'); } catch {} } }\" && npm run start:server",
     "restart:dev": "node -e \"const { spawnSync } = require('child_process'); const ports = ['3001', '5173']; for (const port of ports) { const res = spawnSync('lsof', ['-tiTCP:' + port, '-sTCP:LISTEN'], { encoding: 'utf8' }); if (res.status === 0 && res.stdout.trim()) { for (const pid of res.stdout.trim().split(/\\s+/)) { try { process.kill(Number(pid), 'SIGTERM'); } catch {} } } }\" && npm run dev",
     "dev": "npx concurrently \"npm run start:server\" \"npm run start:client\" > combined.log 2>&1",
-    "install:all": "cd server && npm install && cd ../client && npm install"
+    "install:all": "cd server && npm install && cd ../client && npm install",
+    "screenshot:stitch:mobile": "node scripts/capture-stitch-mobile.js"
   },
   "devDependencies": {
     "@playwright/test": "^1.59.1",
