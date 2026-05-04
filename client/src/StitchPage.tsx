@@ -17,6 +17,11 @@ interface ClipItem {
   trimEnd: number;
 }
 
+interface TransitionConfig {
+  type: 'none' | 'fade' | 'crossfade';
+  duration: number;
+}
+
 interface PreviewSegment {
   clip: ClipItem;
   clipIndex: number;
@@ -30,6 +35,11 @@ interface PendingPreviewSeek {
   clipIndex: number;
   sourceTime: number;
   autoPlay: boolean;
+}
+
+interface TransitionPreviewResult {
+  url: string;
+  fileName: string;
 }
 
 const secondsToHMS = (secs: number) => {
@@ -102,6 +112,7 @@ declare global {
 
 const fileClipCache = new Map<string, File>();
 const CLIPS_STORAGE_KEY = 'stitcher_clips';
+const TRANSITIONS_STORAGE_KEY = 'stitcher_transitions';
 const ACTIVE_JOB_KEY = 'stitcher_active_job';
 const PREVIEW_COLORS = [
   '#60a5fa',
@@ -133,6 +144,56 @@ const persistClips = (clips: ClipItem[]) => {
   localStorage.setItem(CLIPS_STORAGE_KEY, JSON.stringify(serialized));
 };
 
+const persistTransitions = (transitions: TransitionConfig[]) => {
+  localStorage.setItem(TRANSITIONS_STORAGE_KEY, JSON.stringify(transitions));
+};
+
+const prepareClipsForServer = async (clips: ClipItem[]) => {
+  return Promise.all(clips.map(async (clip) => {
+    if (clip.type === 'file' && !clip.uploadedPath) {
+      if (!clip.file) {
+        throw new Error(`File clip "${clip.title}" must be re-uploaded before stitching`);
+      }
+
+      const formData = new FormData();
+      formData.append('file', clip.file);
+
+      const res = await fetch('/api/stitch/upload-file', {
+        method: 'POST',
+        body: formData
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to upload clip');
+      }
+
+      return { ...clip, uploadedPath: data.uploadedPath };
+    }
+
+    return clip;
+  }));
+};
+
+const serializeClipsForServer = (clips: ClipItem[]) => clips.map((clip) => ({
+  type: clip.type,
+  uploadedPath: clip.uploadedPath,
+  youtubeUrl: clip.youtubeUrl,
+  trimStart: clip.trimStart,
+  trimEnd: clip.trimEnd,
+  duration: clip.duration
+}));
+
+const loadTransitionsFromStorage = (): TransitionConfig[] => {
+  try {
+    const stored = localStorage.getItem(TRANSITIONS_STORAGE_KEY);
+    if (!stored) return [];
+    return JSON.parse(stored) as TransitionConfig[];
+  } catch (err) {
+    console.error('Failed to load transitions from storage:', err);
+    return [];
+  }
+};
+
 const loadClipsFromStorage = (setClips: React.Dispatch<React.SetStateAction<ClipItem[]>>) => {
   try {
     const stored = localStorage.getItem(CLIPS_STORAGE_KEY);
@@ -156,6 +217,7 @@ const loadClipsFromStorage = (setClips: React.Dispatch<React.SetStateAction<Clip
 
 function StitchPage() {
   const [clips, setClips] = useState<ClipItem[]>([]);
+  const [transitions, setTransitions] = useState<TransitionConfig[]>([]);
   const [ytInput, setYtInput] = useState('');
   const [ytLoading, setYtLoading] = useState(false);
   const [previewLoaded, setPreviewLoaded] = useState(false);
@@ -165,6 +227,10 @@ function StitchPage() {
   const [progress, setProgress] = useState({ percent: 0, etc: '' });
   const [isStitching, setIsStitching] = useState(false);
   const [stitchResult, setStitchResult] = useState<{ url: string; fileName: string } | null>(null);
+  const [transitionPreviewResult, setTransitionPreviewResult] = useState<TransitionPreviewResult | null>(null);
+  const [transitionPreviewLoading, setTransitionPreviewLoading] = useState(false);
+  const [transitionPreviewIndex, setTransitionPreviewIndex] = useState<number | null>(null);
+  const [transitionPreviewError, setTransitionPreviewError] = useState<string | null>(null);
   const [socket, setSocket] = useState<Socket | null>(null);
   const [youtubeReady, setYoutubeReady] = useState(false);
 
@@ -180,10 +246,25 @@ function StitchPage() {
     pointerId: null,
     previewTime: 0
   });
+  const previewIndexRef = useRef(0);
+  const transitionPreviewRequestIdRef = useRef(0);
   const clipsRef = useRef<ClipItem[]>([]);
+  const previewSegmentsRef = useRef<PreviewSegment[]>([]);
   const logContainerRef = useRef<HTMLDivElement>(null);
+  const pageEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const projectInputRef = useRef<HTMLInputElement>(null);
+  const clipInitializedRef = useRef(false);
+
+  const syncTransitionsWithClips = (newClips: ClipItem[], currentTransitions: TransitionConfig[]) => {
+    const expectedLen = Math.max(0, newClips.length - 1);
+    let newTransitions = currentTransitions.slice(0, expectedLen);
+    while (newTransitions.length < expectedLen) {
+      newTransitions.push({ type: 'none', duration: 0.5 });
+    }
+    persistTransitions(newTransitions);
+    return newTransitions;
+  };
 
   const previewSegments: PreviewSegment[] = clips.reduce<PreviewSegment[]>((segments, clip, clipIndex) => {
     const duration = Math.max(0, clip.trimEnd - clip.trimStart);
@@ -205,7 +286,27 @@ function StitchPage() {
 
   useEffect(() => {
     loadClipsFromStorage(setClips);
+    const loaded = loadTransitionsFromStorage();
+    setTransitions(loaded);
   }, []);
+
+  // Ensure transitions are always synced with clips length
+  useEffect(() => {
+    if (clips.length > 0) {
+      const expectedLen = clips.length - 1;
+      if (transitions.length !== expectedLen) {
+        setTransitions((t) => syncTransitionsWithClips(clips, t));
+      }
+    }
+  }, [clips.length]);
+
+  useEffect(() => {
+    transitionPreviewRequestIdRef.current += 1;
+    setTransitionPreviewResult(null);
+    setTransitionPreviewError(null);
+    setTransitionPreviewLoading(false);
+    setTransitionPreviewIndex(null);
+  }, [clips, transitions]);
 
   useEffect(() => {
     if (document.querySelector('script[src="https://www.youtube.com/iframe_api"]')) {
@@ -276,9 +377,19 @@ function StitchPage() {
     }
   }, [logs]);
 
-  useEffect(() => {
-    clipsRef.current = clips;
-  }, [clips]);
+  clipsRef.current = clips;
+  previewIndexRef.current = previewIndex;
+  previewSegmentsRef.current = previewSegments;
+
+  const setGlobalElapsedForSourceTime = (clipIndex: number, sourceTime: number) => {
+    const segment = previewSegmentsRef.current[clipIndex];
+    if (!segment) return;
+
+    const clipElapsed = Math.max(0, sourceTime - segment.clip.trimStart);
+    const clampedElapsed = Math.min(segment.duration, clipElapsed);
+    const value = segment.globalStart + clampedElapsed;
+    setGlobalElapsed(Math.max(segment.globalStart, Math.min(segment.globalEnd, value)));
+  };
 
   const addFileClip = (file: File) => {
     const objectUrl = URL.createObjectURL(file);
@@ -302,6 +413,10 @@ function StitchPage() {
       setClips((prev) => {
         const updated = [...prev, newClip];
         persistClips(updated);
+        setTransitions((t) => {
+          const synced = syncTransitionsWithClips(updated, t);
+          return synced;
+        });
         return updated;
       });
       if (previewLoaded) {
@@ -357,6 +472,10 @@ function StitchPage() {
       setClips((prev) => {
         const updated = [...prev, newClip];
         persistClips(updated);
+        setTransitions((t) => {
+          const synced = syncTransitionsWithClips(updated, t);
+          return synced;
+        });
         return updated;
       });
       setYtInput('');
@@ -381,6 +500,10 @@ function StitchPage() {
     setClips((prev) => {
       const updated = prev.filter((c) => c.id !== id);
       persistClips(updated);
+      setTransitions((t) => {
+        const synced = syncTransitionsWithClips(updated, t);
+        return synced;
+      });
       return updated;
     });
     if (previewLoaded) {
@@ -400,7 +523,9 @@ function StitchPage() {
       });
       fileClipCache.clear();
       setClips([]);
+      setTransitions([]);
       localStorage.removeItem(CLIPS_STORAGE_KEY);
+      localStorage.removeItem(TRANSITIONS_STORAGE_KEY);
       clearPreview();
     }
   };
@@ -414,6 +539,10 @@ function StitchPage() {
       const next = [...prev];
       [next[idx], next[newIdx]] = [next[newIdx], next[idx]];
       persistClips(next);
+      setTransitions((t) => {
+        const synced = syncTransitionsWithClips(next, t);
+        return synced;
+      });
       return next;
     });
     if (previewLoaded) {
@@ -455,17 +584,29 @@ function StitchPage() {
 
   const advancePreview = () => {
     const current = clipsRef.current;
-    if (previewIndex + 1 < current.length) {
-      setPreviewIndex(previewIndex + 1);
-    } else {
-      clearPreview();
-    }
+    clipInitializedRef.current = false;
+    setPreviewIndex((currentIndex) => {
+      const currentSegment = previewSegmentsRef.current[currentIndex];
+      if (currentSegment) {
+        setGlobalElapsed(currentSegment.globalEnd);
+      }
+
+      if (currentIndex + 1 < current.length) {
+        return currentIndex + 1;
+      }
+
+      window.setTimeout(() => {
+        clearPreview();
+      }, 0);
+      return currentIndex;
+    });
   };
 
   const clearPreview = () => {
     setPreviewLoaded(false);
     setPreviewPlaying(false);
     setPreviewIndex(0);
+    clipInitializedRef.current = false;
     pendingPreviewSeekRef.current = null;
     if (previewIntervalRef.current) {
       clearInterval(previewIntervalRef.current);
@@ -502,6 +643,9 @@ function StitchPage() {
       sourceTime,
       autoPlay: true
     };
+    if (segment.clipIndex !== previewIndex) {
+      clipInitializedRef.current = false;
+    }
     setPreviewIndex(segment.clipIndex);
     setPreviewLoaded(true);
     setPreviewPlaying(true);
@@ -518,6 +662,7 @@ function StitchPage() {
     const pending = pendingPreviewSeekRef.current;
     const targetTime = pending?.clipIndex === previewIndex ? pending.sourceTime : (sourceTime ?? clip.trimStart);
     const shouldPlay = pending?.clipIndex === previewIndex ? pending.autoPlay : previewPlaying;
+    setGlobalElapsedForSourceTime(previewIndex, targetTime);
 
     if (clip.type === 'file' && previewVideoRef.current) {
       if (Number.isFinite(targetTime)) {
@@ -559,7 +704,8 @@ function StitchPage() {
         trimStart: c.trimStart,
         trimEnd: c.trimEnd,
         uploadedPath: c.uploadedPath
-      }))
+      })),
+      transitions
     };
 
     const json = JSON.stringify(projectData, null, 2);
@@ -618,12 +764,77 @@ function StitchPage() {
 
       setClips(restoredClips);
       persistClips(restoredClips);
+      const restoredTransitions = projectData.transitions || [];
+      const synced = syncTransitionsWithClips(restoredClips, restoredTransitions);
+      setTransitions(synced);
       if (previewLoaded) {
         clearPreview();
       }
       alert(`Loaded ${restoredClips.length} clips`);
     } catch (err: any) {
       alert(`Failed to load project: ${err.message}`);
+    }
+  };
+
+  const clearTransitionPreview = () => {
+    transitionPreviewRequestIdRef.current += 1;
+    setTransitionPreviewResult(null);
+    setTransitionPreviewError(null);
+    setTransitionPreviewLoading(false);
+    setTransitionPreviewIndex(null);
+  };
+
+  const scrollToPageEnd = () => {
+    requestAnimationFrame(() => {
+      pageEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    });
+  };
+
+  const startTransitionPreview = async (transitionIndex: number) => {
+    if (hasOrphanedClips || transitionPreviewLoading || isStitching) return;
+
+    const transition = transitions[transitionIndex];
+    if (!transition || transition.type === 'none') return;
+
+    const requestId = transitionPreviewRequestIdRef.current + 1;
+    transitionPreviewRequestIdRef.current = requestId;
+    setTransitionPreviewLoading(true);
+    setTransitionPreviewIndex(transitionIndex);
+    setTransitionPreviewResult(null);
+    setTransitionPreviewError(null);
+
+    try {
+      const preparedClips = await prepareClipsForServer(clips);
+      const res = await fetch('/api/stitch/preview-transition', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          clips: serializeClipsForServer(preparedClips),
+          transitions,
+          transitionIndex
+        })
+      });
+      const data = await res.json();
+
+      if (transitionPreviewRequestIdRef.current !== requestId) {
+        return;
+      }
+
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to render transition preview');
+      }
+
+      setTransitionPreviewResult(data);
+    } catch (err: any) {
+      if (transitionPreviewRequestIdRef.current !== requestId) {
+        return;
+      }
+      setTransitionPreviewResult(null);
+      setTransitionPreviewError(err.message || 'Failed to render transition preview');
+    } finally {
+      if (transitionPreviewRequestIdRef.current === requestId) {
+        setTransitionPreviewLoading(false);
+      }
     }
   };
 
@@ -641,37 +852,18 @@ function StitchPage() {
     setStitchResult(null);
     setLogs(['Starting stitch...']);
     setProgress({ percent: 0, etc: 'Starting...' });
+    clearTransitionPreview();
 
     try {
-      const clipsToStitch = await Promise.all(
-        clips.map(async (clip) => {
-          if (clip.type === 'file' && !clip.uploadedPath && clip.file) {
-            const formData = new FormData();
-            formData.append('file', clip.file);
-            const res = await fetch('/api/stitch/upload-file', {
-              method: 'POST',
-              body: formData
-            });
-            const data = await res.json();
-            if (!res.ok) throw new Error(data.error);
-            return { ...clip, uploadedPath: data.uploadedPath };
-          }
-          return clip;
-        })
-      );
+      const clipsToStitch = await prepareClipsForServer(clips);
 
       const res = await fetch('/api/stitch/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           socketId: socket.id,
-          clips: clipsToStitch.map((c) => ({
-            type: c.type,
-            uploadedPath: c.uploadedPath,
-            youtubeUrl: c.youtubeUrl,
-            trimStart: c.trimStart,
-            trimEnd: c.trimEnd
-          }))
+          clips: serializeClipsForServer(clipsToStitch),
+          transitions
         })
       });
       const data = await res.json();
@@ -697,24 +889,8 @@ function StitchPage() {
       setGlobalElapsed(0);
       setScrubElapsed(0);
       setIsDraggingPreview(false);
-      return;
     }
-
-    const interval = setInterval(() => {
-      const currentSegment = previewSegments[previewIndex];
-      let elapsed = currentSegment ? currentSegment.globalStart : 0;
-      if (currentSegment) {
-        if (currentSegment.clip.type === 'file' && previewVideoRef.current) {
-          elapsed += Math.max(0, previewVideoRef.current.currentTime - currentSegment.clip.trimStart);
-        } else if (currentSegment.clip.type === 'youtube' && previewYtPlayerRef.current && previewYtPlayerRef.current.getCurrentTime) {
-          elapsed += Math.max(0, previewYtPlayerRef.current.getCurrentTime() - currentSegment.clip.trimStart);
-        }
-      }
-      setGlobalElapsed(Math.max(0, Math.min(totalDuration, elapsed)));
-    }, 250);
-
-    return () => clearInterval(interval);
-  }, [previewLoaded, previewIndex, previewSegments, totalDuration]);
+  }, [previewLoaded]);
 
   const getTimeFromClientX = (clientX: number) => {
     const track = previewTimelineTrackRef.current;
@@ -798,6 +974,10 @@ function StitchPage() {
           clip={currentClip}
           onRef={(player) => { previewYtPlayerRef.current = player; }}
           onAdvance={advancePreview}
+          onProgress={(sourceTime) => {
+            setGlobalElapsedForSourceTime(previewIndex, sourceTime);
+          }}
+          onReady={() => { clipInitializedRef.current = true; }}
           previewIntervalRef={previewIntervalRef}
           pendingPreviewSeekRef={pendingPreviewSeekRef}
           previewIndex={previewIndex}
@@ -841,20 +1021,38 @@ function StitchPage() {
         <>
           <div style={{ marginTop: '8px' }}>
             {clips.map((clip, idx) => (
-              <ClipCard
-                key={clip.id}
-                clip={clip}
-                index={idx}
-                total={clips.length}
-                onRemove={() => removeClip(clip.id)}
-                onTrimChange={(field, value) => updateTrim(clip.id, field, value)}
-                onPlayerRef={(el) => { videoRefs.current[clip.id] = el; }}
-                onYtPlayerInit={(player) => { ytPlayerRefs.current[clip.id] = player; }}
-                onMoveUp={() => moveClip(clip.id, 'up')}
-                onMoveDown={() => moveClip(clip.id, 'down')}
-                onReupload={(file) => reuploadFileClip(clip.id, file)}
-                youtubeReady={youtubeReady}
-              />
+              <div key={clip.id}>
+                <ClipCard
+                  clip={clip}
+                  index={idx}
+                  total={clips.length}
+                  onRemove={() => removeClip(clip.id)}
+                  onTrimChange={(field, value) => updateTrim(clip.id, field, value)}
+                  onPlayerRef={(el) => { videoRefs.current[clip.id] = el; }}
+                  onYtPlayerInit={(player) => { ytPlayerRefs.current[clip.id] = player; }}
+                  onMoveUp={() => moveClip(clip.id, 'up')}
+                  onMoveDown={() => moveClip(clip.id, 'down')}
+                  onReupload={(file) => reuploadFileClip(clip.id, file)}
+                  youtubeReady={youtubeReady}
+                />
+                {idx < clips.length - 1 && transitions[idx] && (
+                  <TransitionControl
+                    transition={transitions[idx]}
+                    onChange={(t) => {
+                      const updated = [...transitions];
+                      updated[idx] = t;
+                      setTransitions(updated);
+                      persistTransitions(updated);
+                    }}
+                    onPreview={() => {
+                      scrollToPageEnd();
+                      startTransitionPreview(idx);
+                    }}
+                    isPreviewing={transitionPreviewLoading && transitionPreviewIndex === idx}
+                    index={idx}
+                  />
+                )}
+              </div>
             ))}
           </div>
 
@@ -881,6 +1079,60 @@ function StitchPage() {
               </>
             )}
           </div>
+
+          {(transitionPreviewLoading || transitionPreviewResult || transitionPreviewError) && transitionPreviewIndex !== null && transitions[transitionPreviewIndex] && (
+            <div className="transition-preview-panel">
+              <div className="transition-preview-header">
+                <div>
+                  <div className="transition-preview-title">Transition Preview</div>
+                  <div className="transition-preview-meta">
+                    Boundary <span className="highlight-text">{transitionPreviewIndex + 1}→{transitionPreviewIndex + 2}</span> • {transitions[transitionPreviewIndex].type} • {formatTimestamp(transitions[transitionPreviewIndex].duration, transitions[transitionPreviewIndex].duration)}
+                  </div>
+                </div>
+                <button onClick={clearTransitionPreview} className="secondary mini-btn">
+                  Clear
+                </button>
+              </div>
+
+              <div
+                className={`transition-preview-progress ${transitionPreviewLoading ? 'is-loading' : transitionPreviewResult ? 'is-complete' : 'is-error'}`}
+                role="progressbar"
+                aria-label="Transition preview progress"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={transitionPreviewLoading ? 68 : 100}
+              >
+                <div
+                  className="transition-preview-progress-fill"
+                  style={{ width: transitionPreviewLoading ? '68%' : '100%' }}
+                />
+              </div>
+
+              {transitionPreviewLoading && (
+                <div className="transition-preview-state">Rendering transition preview...</div>
+              )}
+
+              {!transitionPreviewLoading && transitionPreviewError && (
+                <div className="transition-preview-state transition-preview-error">
+                  {transitionPreviewError}
+                </div>
+              )}
+
+              {!transitionPreviewLoading && transitionPreviewResult && (
+                <div className="transition-preview-body">
+                  <video
+                    controls
+                    src={transitionPreviewResult.url}
+                    className="transition-preview-video"
+                  />
+                  <div className="transition-preview-footer">
+                    <span>{transitionPreviewResult.fileName}</span>
+                    <span>Uses the same ffmpeg transition path as the final stitch.</span>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
 
           {previewLoaded && (
             <div className="preview-player-section" style={{ marginTop: '20px' }}>
@@ -939,7 +1191,7 @@ function StitchPage() {
                         className={`preview-timeline-segment${index === 0 ? ' is-first' : ''}${index === previewSegments.length - 1 ? ' is-last' : ''}`}
                         title={`${segment.clip.title} • ${formatTimestamp(segment.clip.trimStart, segment.clip.duration)} - ${formatTimestamp(segment.clip.trimEnd, segment.clip.duration)}`}
                         style={{
-                          flexGrow: segment.duration || 1,
+                          flex: `${Math.max(segment.duration, 0.0001)} 0 0`,
                           backgroundColor: segment.color,
                           opacity: previewIndex === segment.clipIndex ? 1 : 0.78
                         }}
@@ -982,12 +1234,17 @@ function StitchPage() {
                   style={{ width: '100%', borderRadius: '8px', backgroundColor: '#000', maxHeight: '500px', display: 'block' }}
                   onLoadedMetadata={() => {
                     if (previewVideoRef.current) {
+                      clipInitializedRef.current = true;
                       syncPreviewPlayback();
                     }
                   }}
                   onTimeUpdate={() => {
-                    if (previewVideoRef.current && previewVideoRef.current.currentTime >= currentClip.trimEnd) {
-                      advancePreview();
+                    if (previewVideoRef.current && clipInitializedRef.current) {
+                      const sourceTime = previewVideoRef.current.currentTime;
+                      setGlobalElapsedForSourceTime(previewIndex, sourceTime);
+                      if (sourceTime >= currentClip.trimEnd) {
+                        advancePreview();
+                      }
                     }
                   }}
                   onPlay={() => setPreviewPlaying(true)}
@@ -1050,6 +1307,7 @@ function StitchPage() {
       <footer style={{ marginTop: '40px', padding: '20px 0', textAlign: 'center', borderTop: '1px solid var(--border)', color: 'var(--text-dim)', fontSize: '0.85rem' }}>
         <p>© {new Date().getFullYear()} <strong>YouTubeTailor</strong> — Handcrafted for perfect cuts.</p>
       </footer>
+      <div ref={pageEndRef} />
     </div>
   );
 }
@@ -1270,15 +1528,19 @@ interface YouTubePreviewInitProps {
   clip: ClipItem;
   onRef: (player: any) => void;
   onAdvance: () => void;
+  onProgress: (sourceTime: number) => void;
+  onReady: () => void;
   previewIntervalRef: React.MutableRefObject<ReturnType<typeof setInterval> | null>;
   pendingPreviewSeekRef: React.MutableRefObject<PendingPreviewSeek | null>;
   previewIndex: number;
   previewPlaying: boolean;
 }
 
-function YouTubePreviewInit({ clip, onRef, onAdvance, previewIntervalRef, pendingPreviewSeekRef, previewIndex, previewPlaying }: YouTubePreviewInitProps) {
+function YouTubePreviewInit({ clip, onRef, onAdvance, onProgress, onReady, previewIntervalRef, pendingPreviewSeekRef, previewIndex, previewPlaying }: YouTubePreviewInitProps) {
   const onAdvanceRef = useRef(onAdvance);
   onAdvanceRef.current = onAdvance;
+  const onProgressRef = useRef(onProgress);
+  onProgressRef.current = onProgress;
   const previewIndexRef = useRef(previewIndex);
   previewIndexRef.current = previewIndex;
   const previewPlayingRef = useRef(previewPlaying);
@@ -1299,6 +1561,7 @@ function YouTubePreviewInit({ clip, onRef, onAdvance, previewIntervalRef, pendin
       },
       events: {
         onReady: (event: any) => {
+          onReady();
           const pending = pendingPreviewSeekRef.current;
           const targetTime = pending?.clipIndex === previewIndexRef.current ? pending.sourceTime : clip.trimStart;
           event.target.seekTo(targetTime, true);
@@ -1314,12 +1577,13 @@ function YouTubePreviewInit({ clip, onRef, onAdvance, previewIntervalRef, pendin
             if (previewIntervalRef.current) clearInterval(previewIntervalRef.current);
             previewIntervalRef.current = setInterval(() => {
               const currentTime = event.target.getCurrentTime();
+              onProgressRef.current(currentTime);
               if (currentTime >= clip.trimEnd) {
                 event.target.pauseVideo();
                 if (previewIntervalRef.current) clearInterval(previewIntervalRef.current);
                 onAdvanceRef.current();
               }
-            }, 250);
+            }, 100);
           } else if (
             event.data === window.YT.PlayerState.PAUSED ||
             event.data === window.YT.PlayerState.ENDED
@@ -1342,6 +1606,83 @@ function YouTubePreviewInit({ clip, onRef, onAdvance, previewIntervalRef, pendin
   }, [clip.videoId, clip.trimStart, clip.trimEnd]);
 
   return null;
+}
+
+interface TransitionControlProps {
+  transition: TransitionConfig;
+  onChange: (transition: TransitionConfig) => void;
+  onPreview: () => void;
+  isPreviewing: boolean;
+  index: number;
+}
+
+function TransitionControl({ transition, onChange, onPreview, isPreviewing, index }: TransitionControlProps) {
+  const [durationDisplay, setDurationDisplay] = useState(String(transition.duration));
+  const [isFocused, setIsFocused] = useState(false);
+
+  useEffect(() => {
+    if (!isFocused) {
+      setDurationDisplay(String(transition.duration));
+    }
+  }, [transition.duration, isFocused]);
+
+  const handleDurationChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setDurationDisplay(e.target.value);
+  };
+
+  const handleDurationBlur = () => {
+    setIsFocused(false);
+    const parsed = parseFloat(durationDisplay);
+    if (!isNaN(parsed)) {
+      const clamped = Math.max(0.2, Math.min(3, parsed));
+      onChange({ ...transition, duration: clamped });
+      setDurationDisplay(String(clamped));
+    } else {
+      setDurationDisplay(String(transition.duration));
+    }
+  };
+
+  return (
+    <div className="transition-control-row">
+      <span className="transition-control-label">Transition {index + 1}→{index + 2}:</span>
+      <select
+        value={transition.type}
+        onChange={(e) => onChange({ ...transition, type: e.target.value as any })}
+        className="transition-control-select"
+      >
+        <option value="none">None (hard cut)</option>
+        <option value="fade">Fade to Silence</option>
+        <option value="crossfade">Crossfade</option>
+      </select>
+      <div className="transition-control-duration-wrap">
+        {transition.type !== 'none' && (
+          <div className="transition-control-duration">
+            <input
+              type="text"
+              inputMode="decimal"
+              value={durationDisplay}
+              onChange={handleDurationChange}
+              onFocus={() => setIsFocused(true)}
+              onBlur={handleDurationBlur}
+              title="Duration in seconds (0.2-3.0)"
+              placeholder="0.5"
+            />
+            <span>s</span>
+          </div>
+        )}
+      </div>
+      {transition.type !== 'none' && (
+        <button
+          type="button"
+          className="secondary mini-btn transition-preview-btn"
+          onClick={onPreview}
+          disabled={isPreviewing || isFocused}
+        >
+          {isPreviewing ? 'Rendering Preview...' : 'Preview Transition'}
+        </button>
+      )}
+    </div>
+  );
 }
 
 export default StitchPage;

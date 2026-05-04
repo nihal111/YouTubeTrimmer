@@ -159,7 +159,7 @@ app.post('/api/stitch/upload-file', (req, res, next) => {
 
 // Stitch start endpoint (initiate stitching with mixed sources)
 app.post('/api/stitch/start', express.json(), (req, res) => {
-  const { socketId, clips } = req.body;
+  const { socketId, clips, transitions } = req.body;
 
   if (!clips || !Array.isArray(clips) || clips.length < 2) {
     return res.status(400).json({ error: 'At least 2 clips are required' });
@@ -169,6 +169,7 @@ app.post('/api/stitch/start', express.json(), (req, res) => {
   const job = {
     id: jobId,
     clips,
+    transitions,
     sockets: [socketId],
     progress: { percent: 0, etc: 'Calculating...' },
     logs: [],
@@ -180,7 +181,7 @@ app.post('/api/stitch/start', express.json(), (req, res) => {
   res.json({ ok: true, jobId });
 
   // Process asynchronously
-  setImmediate(() => runStitch(jobId, clips));
+  setImmediate(() => runStitch(jobId, clips, transitions));
 });
 
 io.on('connection', (socket) => {
@@ -289,85 +290,173 @@ function runCommand(jobId, cmd, args) {
   });
 }
 
-// Stitch function - concatenates multiple clips (file or YouTube) with per-clip trimming
-async function runStitch(jobId, clips) {
-  const outputFileName = `${jobId}.mp4`;
-  const outputPath = path.join(DOWNLOADS_DIR, outputFileName);
+function snapDuration(d) {
+  return Math.round(d * 5) / 5;
+}
+
+function buildClipBuffers(clips, transitions = []) {
+  return clips.map((clip, i) => {
+    const isYouTube = clip.type === 'youtube';
+    const leadingBuffer = !isYouTube && i > 0 && transitions[i - 1]?.type === 'crossfade'
+      ? snapDuration(transitions[i - 1].duration) / 2
+      : 0;
+    const trailingBuffer = !isYouTube && i < clips.length - 1 && transitions[i]?.type === 'crossfade'
+      ? snapDuration(transitions[i].duration) / 2
+      : 0;
+
+    const adjStart = Math.max(0, Math.floor((clip.trimStart - leadingBuffer) * 100) / 100);
+    const adjEnd = Math.min(clip.duration, Math.ceil((clip.trimEnd + trailingBuffer) * 100) / 100);
+    const actualLeading = clip.trimStart - adjStart;
+    const actualTrailing = adjEnd - clip.trimEnd;
+    const origDuration = clip.trimEnd - clip.trimStart;
+
+    return {
+      adjStart,
+      adjEnd,
+      actualLeading,
+      actualTrailing,
+      origDuration,
+      needsFadeIn: i > 0 && transitions[i - 1]?.type === 'fade',
+      needsFadeOut: i < clips.length - 1 && transitions[i]?.type === 'fade',
+      fadeInDuration: transitions[i - 1]?.duration || 0.5,
+      fadeOutDuration: transitions[i]?.duration || 0.5
+    };
+  });
+}
+
+function buildTransitionPreviewClips(clips, transitions, transitionIndex, contextSeconds = 2) {
+  const transition = transitions[transitionIndex];
+  const leftClip = clips[transitionIndex];
+  const rightClip = clips[transitionIndex + 1];
+
+  if (!transition || !leftClip || !rightClip) {
+    return null;
+  }
+
+  const extraSeconds = Math.max(0, contextSeconds) + Math.max(0, transition.duration || 0);
+
+  return {
+    previewClips: [
+      {
+        ...leftClip,
+        trimStart: Math.max(leftClip.trimStart, leftClip.trimEnd - extraSeconds),
+        trimEnd: leftClip.trimEnd
+      },
+      {
+        ...rightClip,
+        trimStart: rightClip.trimStart,
+        trimEnd: Math.min(rightClip.trimEnd, rightClip.trimStart + extraSeconds)
+      }
+    ],
+    previewTransitions: [transition]
+  };
+}
+
+async function renderStitchMedia({
+  jobId,
+  clips,
+  transitions = [],
+  outputPath,
+  emitLog = () => {},
+  emitProgress = () => {}
+}) {
   const intermediates = [];
   const filesToCleanup = [];
   const startTime = Date.now();
-
   try {
-    notifyJob(jobId, 'stitch:log', `Processing ${clips.length} clips...`);
 
-    const NORMALIZE_VF = 'scale=1920:1080:force_original_aspect_ratio=decrease:force_divisible_by=2,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,fps=30,setpts=PTS-STARTPTS';
+  emitLog(`Processing ${clips.length} clips with ${transitions?.length || 0} transitions...`);
+  if (transitions?.length > 0) {
+    emitLog(`Transitions: ${transitions.map((t, i) => `${i}→${i + 1}:${t.type}(${t.duration}s)`).join(', ')}`);
+  }
 
-    for (let i = 0; i < clips.length; i++) {
-      const clip = clips[i];
-      const intermediatePath = path.join(UPLOADS_DIR, `${jobId}_clip_${i}.mp4`);
-      intermediates.push(intermediatePath);
+  const NORMALIZE_VF = 'scale=1920:1080:force_original_aspect_ratio=decrease:force_divisible_by=2,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,fps=30,setpts=PTS-STARTPTS';
+  const buffers = buildClipBuffers(clips, transitions);
 
-      notifyJob(jobId, 'stitch:log', `[${i + 1}/${clips.length}] Processing ${clip.type}...`);
-      
-      // Calculate progress and ETC
-      const percent = Math.round((i / (clips.length + 0.5)) * 100); 
-      const elapsed = Date.now() - startTime;
-      const avgTimePerClip = i > 0 ? elapsed / i : 0;
-      const remainingClips = clips.length - i;
-      let etc = 'Calculating...';
-      if (i > 0) {
-        const remainingTimeMs = (avgTimePerClip * remainingClips) + (avgTimePerClip * 0.2); 
-        const remainingSecs = Math.ceil(remainingTimeMs / 1000);
-        etc = remainingSecs > 60 
-          ? `${Math.floor(remainingSecs / 60)}m ${remainingSecs % 60}s`
-          : `${remainingSecs}s`;
-      }
-      
-      notifyJob(jobId, 'stitch:progress', { percent, etc });
+  for (let i = 0; i < clips.length; i++) {
+    const clip = clips[i];
+    const intermediatePath = path.join(UPLOADS_DIR, `${jobId}_clip_${i}.mp4`);
+    intermediates.push(intermediatePath);
 
-      if (clip.type === 'file') {
-        await runCommand(jobId, 'ffmpeg', [
-          '-y',
-          '-ss', String(clip.trimStart),
-          '-to', String(clip.trimEnd),
-          '-i', clip.uploadedPath,
-          '-c:v', 'libx264', '-preset', 'fast',
-          '-c:a', 'aac',
-          '-pix_fmt', 'yuv420p',
-          '-vf', NORMALIZE_VF,
-          '-af', 'asetpts=PTS-STARTPTS',
-          intermediatePath
-        ]);
-      } else {
-        const rawPath = path.join(UPLOADS_DIR, `${jobId}_clip_${i}_raw.mp4`);
-        filesToCleanup.push(rawPath);
+    emitLog(`[${i + 1}/${clips.length}] Processing ${clip.type}...`);
 
-        await runCommand(jobId, 'yt-dlp', [
-          '--download-sections', `*${clip.trimStart}-${clip.trimEnd}`,
-          '--force-keyframes-at-cuts',
-          '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-          '--merge-output-format', 'mp4',
-          '-o', rawPath,
-          clip.youtubeUrl
-        ]);
-
-        notifyJob(jobId, 'stitch:log', `[${i + 1}/${clips.length}] Normalizing (scale + timestamps)...`);
-        await runCommand(jobId, 'ffmpeg', [
-          '-y',
-          '-i', rawPath,
-          '-c:v', 'libx264', '-preset', 'fast',
-          '-c:a', 'aac',
-          '-pix_fmt', 'yuv420p',
-          '-vf', NORMALIZE_VF,
-          '-af', 'asetpts=PTS-STARTPTS',
-          intermediatePath
-        ]);
-      }
+    const percent = Math.round((i / (clips.length + 0.5)) * 100);
+    const elapsed = Date.now() - startTime;
+    const avgTimePerClip = i > 0 ? elapsed / i : 0;
+    const remainingClips = clips.length - i;
+    let etc = 'Calculating...';
+    if (i > 0) {
+      const remainingTimeMs = (avgTimePerClip * remainingClips) + (avgTimePerClip * 0.2);
+      const remainingSecs = Math.ceil(remainingTimeMs / 1000);
+      etc = remainingSecs > 60
+        ? `${Math.floor(remainingSecs / 60)}m ${remainingSecs % 60}s`
+        : `${remainingSecs}s`;
     }
 
-    notifyJob(jobId, 'stitch:progress', { percent: 95, etc: 'Finishing...' });
-    notifyJob(jobId, 'stitch:log', 'Concatenating clips...');
+    emitProgress({ percent, etc });
 
+    const buffer = buffers[i];
+    const afFilters = ['asetpts=PTS-STARTPTS'];
+    if (buffer.needsFadeIn) {
+      afFilters.push(`afade=t=in:st=0:d=${buffer.fadeInDuration}`);
+    }
+    if (buffer.needsFadeOut) {
+      const fadeOutStart = buffer.origDuration - buffer.fadeOutDuration;
+      afFilters.push(`afade=t=out:st=${fadeOutStart}:d=${buffer.fadeOutDuration}`);
+    }
+    const afArg = afFilters.join(',');
+
+    if (clip.type === 'file') {
+      await runCommand(jobId, 'ffmpeg', [
+        '-y',
+        '-ss', String(buffer.adjStart),
+        '-to', String(buffer.adjEnd),
+        '-i', clip.uploadedPath,
+        '-c:v', 'libx264', '-preset', 'fast',
+        '-c:a', 'aac',
+        '-pix_fmt', 'yuv420p',
+        '-vf', NORMALIZE_VF,
+        '-af', afArg,
+        intermediatePath
+      ]);
+    } else {
+      const rawPath = path.join(UPLOADS_DIR, `${jobId}_clip_${i}_raw.mp4`);
+      filesToCleanup.push(rawPath);
+
+      const ytStart = clip.trimStart;
+      const ytEnd = clip.trimEnd;
+
+      emitLog(`Downloading section: *${ytStart}-${ytEnd} from ${clip.youtubeUrl}`);
+
+      await runCommand(jobId, 'yt-dlp', [
+        '--download-sections', `*${ytStart}-${ytEnd}`,
+        '--force-keyframes-at-cuts',
+        '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        '--merge-output-format', 'mp4',
+        '-o', rawPath,
+        clip.youtubeUrl
+      ]);
+
+      emitLog(`[${i + 1}/${clips.length}] Normalizing (scale + timestamps)...`);
+      await runCommand(jobId, 'ffmpeg', [
+        '-y',
+        '-i', rawPath,
+        '-c:v', 'libx264', '-preset', 'fast',
+        '-c:a', 'aac',
+        '-pix_fmt', 'yuv420p',
+        '-vf', NORMALIZE_VF,
+        '-af', afArg,
+        intermediatePath
+      ]);
+    }
+  }
+
+  emitProgress({ percent: 95, etc: 'Finishing...' });
+  emitLog('Concatenating clips...');
+
+  const hasComplexTransition = transitions.some(t => t?.type === 'crossfade');
+
+  if (!hasComplexTransition && clips.length > 0) {
     const concatListPath = path.join(UPLOADS_DIR, `${jobId}_list.txt`);
     const concatContent = intermediates.map((p) => `file '${p}'`).join('\n');
 
@@ -382,6 +471,93 @@ async function runStitch(jobId, clips) {
       '-c', 'copy',
       outputPath
     ]);
+  } else if (clips.length > 0) {
+    const ffmpegArgs = ['-y'];
+
+    intermediates.forEach((clipPath) => {
+      ffmpegArgs.push('-i', clipPath);
+    });
+
+    const videoFilterParts = [];
+    const audioFilterParts = [];
+
+    for (let i = 0; i < clips.length; i++) {
+      const buffer = buffers[i];
+      const vStart = buffer.actualLeading;
+      const vEnd = vStart + buffer.origDuration;
+      videoFilterParts.push(`[${i}:v]trim=start=${vStart}:end=${vEnd},setpts=PTS-STARTPTS[v${i}]`);
+    }
+    const videoLabels = intermediates.map((_, i) => `[v${i}]`).join('');
+    videoFilterParts.push(`${videoLabels}concat=n=${clips.length}:v=1:a=0[vout]`);
+
+    let currentAudioLabel = '[0:a]';
+    for (let i = 0; i < transitions.length; i++) {
+      const t = transitions[i];
+      const nextLabel = i === transitions.length - 1 ? '[aout]' : `[a${i + 1}]`;
+
+      if (t?.type === 'crossfade') {
+        audioFilterParts.push(`${currentAudioLabel}[${i + 1}:a]acrossfade=d=${t.duration}:c1=tri:c2=tri${nextLabel}`);
+      } else {
+        audioFilterParts.push(`${currentAudioLabel}[${i + 1}:a]concat=n=2:v=0:a=1${nextLabel}`);
+      }
+      currentAudioLabel = nextLabel;
+    }
+
+    if (clips.length === 1) {
+      audioFilterParts.push('[0:a]aformat=sample_fmts=fltp[aout]');
+    }
+
+    const filterComplex = videoFilterParts.concat(audioFilterParts).join(';');
+
+    ffmpegArgs.push('-filter_complex', filterComplex);
+    ffmpegArgs.push('-map', '[vout]', '-map', '[aout]');
+    ffmpegArgs.push('-c:v', 'libx264', '-preset', 'fast', '-c:a', 'aac', '-pix_fmt', 'yuv420p');
+    ffmpegArgs.push(outputPath);
+
+    await runCommand(jobId, 'ffmpeg', ffmpegArgs);
+  }
+
+  return {
+    intermediates,
+    filesToCleanup
+  };
+  } finally {
+    await cleanupPaths([
+      ...intermediates,
+      ...filesToCleanup
+    ]);
+  }
+}
+
+async function cleanupPaths(paths) {
+  await Promise.all(paths.filter(Boolean).map((p) => new Promise((resolve) => {
+    fs.unlink(p, (err) => {
+      if (err && err.code !== 'ENOENT') {
+        console.error(`Failed to delete ${p}: ${err.message}`);
+      }
+      resolve();
+    });
+  })));
+}
+
+// Stitch function - concatenates multiple clips (file or YouTube) with per-clip trimming and transitions
+async function runStitch(jobId, clips, transitions = []) {
+  const outputFileName = `${jobId}.mp4`;
+  const outputPath = path.join(DOWNLOADS_DIR, outputFileName);
+  let intermediates = [];
+  let filesToCleanup = [];
+
+  try {
+    const result = await renderStitchMedia({
+      jobId,
+      clips,
+      transitions,
+      outputPath,
+      emitLog: (msg) => notifyJob(jobId, 'stitch:log', msg),
+      emitProgress: (data) => notifyJob(jobId, 'stitch:progress', data)
+    });
+    intermediates = result.intermediates;
+    filesToCleanup = result.filesToCleanup;
 
     notifyJob(jobId, 'stitch:progress', { percent: 100, etc: 'Done!' });
     notifyJob(jobId, 'stitch:complete', {
@@ -393,19 +569,74 @@ async function runStitch(jobId, clips) {
     console.error(`[STITCH] Error: ${err.message}`);
     notifyJob(jobId, 'stitch:error', { error: err.message });
   } finally {
-    const toDelete = [
+    await cleanupPaths([
       ...intermediates,
       ...clips.filter((c) => c.type === 'file').map((c) => c.uploadedPath),
       ...filesToCleanup
-    ];
-
-    toDelete.forEach((p) => {
-      fs.unlink(p, (err) => {
-        if (err) console.error(`Failed to delete ${p}: ${err.message}`);
-      });
-    });
+    ]);
   }
 }
+
+app.post('/api/stitch/preview-transition', express.json(), async (req, res) => {
+  const { clips, transitions, transitionIndex, contextSeconds = 2 } = req.body || {};
+
+  if (!Array.isArray(clips) || clips.length < 2) {
+    return res.status(400).json({ error: 'At least 2 clips are required' });
+  }
+
+  if (!Array.isArray(transitions) || transitionIndex === undefined || transitionIndex === null) {
+    return res.status(400).json({ error: 'transitionIndex is required' });
+  }
+
+  const index = Number(transitionIndex);
+  if (!Number.isInteger(index) || index < 0 || index >= transitions.length) {
+    return res.status(400).json({ error: 'Invalid transitionIndex' });
+  }
+
+  const transition = transitions[index];
+  if (!transition || transition.type === 'none') {
+    return res.status(400).json({ error: 'Preview is only available for fade or crossfade transitions' });
+  }
+
+  const previewClips = buildTransitionPreviewClips(clips, transitions, index, contextSeconds);
+  if (!previewClips) {
+    return res.status(400).json({ error: 'Unable to build transition preview' });
+  }
+
+  const previewJobId = `preview_${Date.now()}`;
+  const outputFileName = `${previewJobId}.mp4`;
+  const outputPath = path.join(DOWNLOADS_DIR, outputFileName);
+  let intermediates = [];
+  let filesToCleanup = [];
+
+  try {
+    const result = await renderStitchMedia({
+      jobId: previewJobId,
+      clips: previewClips.previewClips,
+      transitions: previewClips.previewTransitions,
+      outputPath,
+      emitLog: (msg) => console.log(`[PREVIEW] ${msg}`),
+      emitProgress: () => {}
+    });
+    intermediates = result.intermediates;
+    filesToCleanup = result.filesToCleanup;
+
+    console.log(`[PREVIEW] Completed: ${outputFileName}`);
+    res.json({
+      url: `/downloads/${outputFileName}`,
+      fileName: outputFileName
+    });
+  } catch (err) {
+    console.error(`[PREVIEW] Error: ${err.message}`);
+    return res.status(500).json({ error: err.message });
+  } finally {
+    await cleanupPaths([
+      ...intermediates,
+      ...previewClips.previewClips.filter((c) => c.type === 'file').map((c) => c.uploadedPath),
+      ...filesToCleanup
+    ]);
+  }
+});
 
 
 const PORT = process.env.PORT || 3001;

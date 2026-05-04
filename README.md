@@ -75,6 +75,9 @@ After normalization, all clips are `h264 1920×1080 30 fps / AAC 44100 Hz` with 
 # Install all dependencies
 npm run install:all
 
+# One-click full-stack startup script
+./start-app.sh
+
 # Start both server (port 3001) and client dev server (port 5173)
 npm run dev
 
